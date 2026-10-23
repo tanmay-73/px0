@@ -8,6 +8,9 @@ This directory holds the user-facing feature guides, the internal engineering wr
 
 ## Documentation Sections
 
+- **[Docker Deployment Guide](deployment.md)**: prepare a Linux machine, configure repository mounts and LAN access, deploy and update, back up settings, and troubleshoot.
+- **[Native Deployment Guide](native-deployment.md)**: install or build the binary, run host terminals, configure a systemd user service, update and back up, and switch between Docker and native deployment.
+
 ### 1. [Feature Guides](features/README.md)
 How each feature works and how to use it.
 - **[Features Overview](features/README.md)**: index of all feature areas.

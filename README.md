@@ -113,6 +113,11 @@ The [integrated terminal](docs/features/terminal.md) is off on non-loopback addr
 
 ### Local Docker deployment
 
+See the [detailed Docker deployment guide](docs/deployment.md) for setting up a
+new Linux machine, configuring LAN access, updates, backups, and troubleshooting.
+For host tools in the integrated terminal and a systemd user service, see the
+[native deployment guide](docs/native-deployment.md).
+
 On this machine, run `docker compose up -d --build` and open
 `http://10.20.7.180:7777` from the local network. The container runs the
 workbench: every git repository under `PX0_REPOS` (default `/mnt/nvme1/Projects`,
