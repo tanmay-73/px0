@@ -98,6 +98,20 @@ A terminal runs any command, as you, for whoever can reach px0. So px0 offers it
 - **`-no-terminal`** turns it off everywhere.
 - The workbench passes its own address and these flags on to every workspace it starts.
 - In the Docker image px0 listens on `0.0.0.0`, so the terminal is off unless you add `-terminal` to the command (see `compose.yaml`). The image includes bash.
+- **A terminal runs where px0 runs.** In Docker that is the container: a minimal Alpine system with bash, git and busybox, without your toolchains (node, go, ...), CLIs (claude, codex, docker) or their logins. To work with your own tools, run px0 on the machine itself, for example as a systemd user service started through a login shell so terminals get your usual environment:
+
+  ```ini
+  # ~/.config/systemd/user/px0.service
+  [Service]
+  ExecStart=/bin/bash -lc 'exec px0 -host 127.0.0.1 -port 7777 -no-open'
+  WorkingDirectory=%h/Projects
+  Restart=on-failure
+
+  [Install]
+  WantedBy=default.target
+  ```
+
+  Then run `systemctl --user enable --now px0`, plus `loginctl enable-linger` so it runs while you are logged out. On a loopback address the terminal needs no flag; reach it from another machine through `ssh -L 7777:127.0.0.1:7777 host`.
 - Windows is not supported yet (the panel says so).
 
 Every terminal request is checked like px0's other machine-changing requests: it must come from px0's own page (the `Origin` matches the `Host`), and the `Host` must be an IP address or `localhost`, which stops DNS-rebinding attacks.

@@ -7,7 +7,9 @@ services:
     # The workbench (no folder argument): lists every git repository under
     # PX0_REPOS and opens each as its own workspace. -roots keeps browsing and
     # opening inside that folder, so the rest of the container stays out of reach.
-    # Enable the integrated terminal for clients on the local network.
+    # Enable the integrated terminal for clients on the local network. Its
+    # shells run in this container (bash, git, busybox), not on the host: to
+    # use your own tools (node, go, claude, ...) run px0 natively instead.
     command: ["-terminal", "-roots", "${PX0_REPOS:-/mnt/nvme1/Projects}"]
     working_dir: ${PX0_REPOS:-/mnt/nvme1/Projects}
     ports:
