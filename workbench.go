@@ -336,24 +336,37 @@ type workbench struct {
 	basePath  string
 	cwd       string
 	exe       string
-	childArgs []string // flags handed on to every child (-no-lsp, -agent, ...)
+	childArgs []string // flags handed on to every child (-no-lsp, -no-git)
+	// roots (-roots), when set, are the only folders the workbench lists,
+	// scans for repositories and opens. Absolute, symlinks resolved.
+	roots []string
 
 	mu       sync.Mutex
 	children map[string]*wbChild
 	closing  bool
 
+	repoMu    sync.Mutex
+	repoCache []string // repositories found by the last scan (see scanRepos)
+	repoTrunc bool     // that scan stopped at its budget, so the list may be partial
+	repoAt    time.Time
+
 	mux *http.ServeMux
 }
 
-func newWorkbench(basePath, cwd, exe string, childArgs []string) *workbench {
+func newWorkbench(basePath, cwd, exe string, childArgs, roots []string) *workbench {
 	wb := &workbench{
 		store:     &wbStore{path: workbenchStorePath()},
 		basePath:  cleanBasePath(basePath),
 		cwd:       cwd,
 		exe:       exe,
 		childArgs: childArgs,
+		roots:     roots,
 		children:  map[string]*wbChild{},
 		mux:       http.NewServeMux(),
+	}
+	if len(roots) > 0 && !wb.allowed(cwd) {
+		// "Open <cwd>" and the folder browser start here, so keep it inside.
+		wb.cwd = roots[0]
 	}
 	wb.routes()
 	go wb.reapIdle()
@@ -375,6 +388,8 @@ func (wb *workbench) routes() {
 	wb.mux.HandleFunc(wb.route("/api/wb/state"), wb.handleState)
 	wb.mux.HandleFunc(wb.route("/api/wb/browse"), wb.handleBrowse)
 	wb.mux.HandleFunc(wb.route("/api/wb/complete"), wb.handleComplete)
+	wb.mux.HandleFunc(wb.route("/api/wb/repos"), wb.handleRepos)
+	wb.mux.HandleFunc(wb.route("/api/wb/repostatus"), wb.handleRepoStatus)
 	wb.mux.HandleFunc(wb.route("/api/metrics"), wb.handleMetrics)
 	wb.mux.HandleFunc(wb.route("/api/settings"), wb.handleSettings)
 	wb.mux.HandleFunc(wb.route("/api/wb/open"), wb.handleOpen)
@@ -468,6 +483,11 @@ func (wb *workbench) run(c *wbChild, it wbItem, forget bool) {
 		dir = clone
 		args = append(args, it.URL)
 	} else {
+		// Recorded before -roots narrowed what may be opened.
+		if !wb.allowed(it.Path) {
+			failed(wb.outsideRoots(it.Path))
+			return
+		}
 		args = append(args, it.Path)
 	}
 
@@ -487,7 +507,7 @@ func (wb *workbench) run(c *wbChild, it wbItem, forget bool) {
 	}}
 	cmd.Stdout = out
 	cmd.Stderr = &lineWriter{fn: c.appendLog}
-	// A language server or harness the child started could hold its output
+	// A language server the child started could hold its output
 	// open after it exits; do not let that keep Wait from returning.
 	cmd.WaitDelay = wbStopGrace
 	stdin, err := cmd.StdinPipe()
@@ -704,7 +724,7 @@ func (wb *workbench) handleIndex(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	html := strings.Replace(string(b), `<base href="/">`, fmt.Sprintf(`<base href="%s">`, template.HTMLEscapeString(wb.basePath)), 1)
-	html = strings.Replace(html, `data-theme="catppuccin-mocha"`, fmt.Sprintf(`data-theme="%s"`, template.HTMLEscapeString(wbTheme())), 1)
+	html = strings.Replace(html, `data-theme="vscode-dark-2026"`, fmt.Sprintf(`data-theme="%s"`, template.HTMLEscapeString(wbTheme())), 1)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	io.WriteString(w, html)
 }
@@ -713,7 +733,7 @@ func wbTheme() string {
 	if t := settings.Read().WorkbenchColorTheme; t != nil && *t != "" {
 		return *t
 	}
-	return "catppuccin-mocha"
+	return "vscode-dark-2026"
 }
 
 func (wb *workbench) handlePing(w http.ResponseWriter, r *http.Request) {
@@ -754,6 +774,7 @@ func (wb *workbench) handleState(w http.ResponseWriter, r *http.Request) {
 		"sep":     string(filepath.Separator),
 		"version": version,
 		"items":   views,
+		"roots":   wb.roots,
 	})
 }
 
@@ -778,6 +799,10 @@ func (wb *workbench) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		fail(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	if !wb.reachable(dir) {
+		fail(w, http.StatusForbidden, wb.outsideRoots(dir))
+		return
+	}
 	ents, err := os.ReadDir(dir)
 	if err != nil {
 		fail(w, http.StatusBadRequest, err.Error())
@@ -800,14 +825,14 @@ func (wb *workbench) handleBrowse(w http.ResponseWriter, r *http.Request) {
 				isDir = st.IsDir()
 			}
 		}
-		if !isDir {
+		if !isDir || !wb.reachable(full) {
 			continue
 		}
 		out = append(out, wbEntry{Name: name, Path: full, Git: hasGitMarker(full)})
 	}
 	sort.Slice(out, func(i, j int) bool { return strings.ToLower(out[i].Name) < strings.ToLower(out[j].Name) })
 	parent := filepath.Dir(dir)
-	if parent == dir {
+	if parent == dir || !wb.reachable(parent) {
 		parent = ""
 	}
 	writeJSON(w, map[string]any{"path": dir, "parent": parent, "git": hasGitMarker(dir) || gitAvailable(dir), "entries": out})
@@ -860,7 +885,7 @@ func (wb *workbench) handleComplete(w http.ResponseWriter, r *http.Request) {
 				isDir = st.IsDir()
 			}
 		}
-		if !isDir {
+		if !isDir || !wb.reachable(full) {
 			continue
 		}
 		out = append(out, wbEntry{Name: name, Path: typedDir + name + "/", Git: hasGitMarker(full)})
@@ -1035,6 +1060,10 @@ func (wb *workbench) handleOpen(w http.ResponseWriter, r *http.Request) {
 				fail(w, http.StatusBadRequest, err.Error())
 				return
 			}
+			if !wb.allowed(dir) {
+				fail(w, http.StatusForbidden, wb.outsideRoots(dir))
+				return
+			}
 			top := cloneOf(dir, it.Repo)
 			if top == "" {
 				fail(w, http.StatusBadRequest, fmt.Sprintf("%s is not a clone of %s: none of its remotes points there", tildePath(dir), it.Repo))
@@ -1073,6 +1102,9 @@ func (wb *workbench) resolveTarget(target string) (wbItem, error) {
 	root, _, _, err := resolveTarget(p)
 	if err != nil {
 		return wbItem{}, err
+	}
+	if !wb.allowed(root) {
+		return wbItem{}, errors.New(wb.outsideRoots(root))
 	}
 	return wbDirItem(root), nil
 }
@@ -1252,16 +1284,12 @@ var holdingTmpl = template.Must(template.New("holding").Parse(`<!doctype html>
 {{if .Starting}}<meta http-equiv="refresh" content="1; url={{.Self}}">{{end}}
 <title>{{if .Starting}}Opening…{{else}}px0{{end}}</title>
 <link rel="icon" type="image/x-icon" href="https://px0.ai/favicon.ico">
-<link rel="stylesheet" href="static/style.css">
 <link rel="stylesheet" href="static/themes.css">
-<link rel="stylesheet" href="static/workbench.css">
+<link rel="stylesheet" href="static/dist/workbench.css">
 </head>
 <body class="wb">
 <main class="wb-holding">
-  <div class="empty-logo">
-    <img class="logo-dark" src="https://px0.ai/logo/px0-logo-dark.png" alt="px0" width="160" height="60">
-    <img class="logo-light" src="https://px0.ai/logo/px0-logo-light.png" alt="px0" width="160" height="60">
-  </div>
+  <div class="wb-logo">px<span class="wb-accent">[0]</span></div>
   {{if .Starting}}
   <p class="wb-holding-msg"><span class="wb-spin" aria-hidden="true"></span>Opening <b>{{.Title}}</b>…</p>
   <p class="wb-faint">{{if .Progress}}{{.Progress}}…{{else}}Pull requests are checked out first; large repositories take a while.{{end}}</p>
@@ -1605,4 +1633,281 @@ func tildePath(p string) string {
 		}
 	}
 	return p
+}
+
+/* ---------- roots ---------- */
+
+// parseRoots turns -roots (folders separated like PATH) into absolute
+// directories with symlinks resolved. Empty means no restriction.
+func parseRoots(list, cwd string) ([]string, error) {
+	var roots []string
+	for _, r := range filepath.SplitList(list) {
+		if strings.TrimSpace(r) == "" {
+			continue
+		}
+		p, err := expandPath(r, cwd)
+		if err != nil {
+			return nil, err
+		}
+		if resolved, err := filepath.EvalSymlinks(p); err == nil {
+			p = resolved
+		}
+		st, err := os.Stat(p)
+		if err != nil {
+			return nil, fmt.Errorf("-roots: %w", err)
+		}
+		if !st.IsDir() {
+			return nil, fmt.Errorf("-roots: %s is not a directory", p)
+		}
+		roots = append(roots, p)
+	}
+	return roots, nil
+}
+
+// pathWithin reports whether p is root or inside it.
+func pathWithin(root, p string) bool {
+	rel, err := filepath.Rel(root, p)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) && !filepath.IsAbs(rel)
+}
+
+// resolvedPath is p with symlinks resolved when it exists, so a link cannot
+// lead out of the roots.
+func resolvedPath(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return filepath.Clean(p)
+}
+
+// allowed reports whether p may be opened: inside one of the roots, or
+// anywhere when there are none.
+func (wb *workbench) allowed(p string) bool {
+	if len(wb.roots) == 0 {
+		return true
+	}
+	p = resolvedPath(p)
+	for _, root := range wb.roots {
+		if pathWithin(root, p) {
+			return true
+		}
+	}
+	return false
+}
+
+// reachable is allowed, plus the folders above a root: the browser and the
+// path completion walk through those to get to it, listing nothing else.
+func (wb *workbench) reachable(p string) bool {
+	if wb.allowed(p) {
+		return true
+	}
+	p = resolvedPath(p)
+	for _, root := range wb.roots {
+		if pathWithin(p, root) {
+			return true
+		}
+	}
+	return false
+}
+
+func (wb *workbench) outsideRoots(p string) string {
+	return fmt.Sprintf("%s is outside the folders this px0 may open (%s)", tildePath(p), strings.Join(wb.roots, string(filepath.ListSeparator)))
+}
+
+/* ---------- repositories ---------- */
+
+// The Repositories list is every git repository found under the roots (or,
+// without -roots, the usual code folders): a breadth-first walk that stops at
+// each repository it finds rather than descending into it, bounded in depth,
+// folders and time. The result is kept for wbRepoTTL; ?refresh=1 rescans.
+const (
+	wbRepoDepth   = 4
+	wbRepoBudget  = 60000
+	wbRepoTimeout = 4 * time.Second
+	wbRepoMax     = 2000
+	wbRepoTTL     = time.Minute
+	wbRepoStatusT = 5 * time.Second
+)
+
+type wbRepo struct {
+	Name string `json:"name"`
+	Path string `json:"path"`
+	ID   string `json:"id"` // the workbench item ID it has, or would have, once opened
+}
+
+// repoScanRoots are -roots when given; otherwise the folder px0 was started
+// in and the places scanRoots looks for PR clones.
+func (wb *workbench) repoScanRoots() []string {
+	if len(wb.roots) > 0 {
+		return wb.roots
+	}
+	return scanRoots(wb.store.Load(), wb.cwd)
+}
+
+// scanRepos walks roots breadth-first for git repositories. truncated is set
+// when it ran out of budget or time before finishing.
+func scanRepos(ctx context.Context, roots []string) (repos []string, truncated bool) {
+	ctx, cancel := context.WithTimeout(ctx, wbRepoTimeout)
+	defer cancel()
+	type node struct {
+		path  string
+		depth int
+	}
+	seen := map[string]bool{}
+	var queue []node
+	for _, r := range roots {
+		r = resolvedPath(r)
+		if r != "" && !seen[r] {
+			seen[r] = true
+			queue = append(queue, node{r, 0})
+		}
+	}
+	budget := wbRepoBudget
+	for len(queue) > 0 {
+		if budget <= 0 || ctx.Err() != nil || len(repos) >= wbRepoMax {
+			return repos, true
+		}
+		n := queue[0]
+		queue = queue[1:]
+		if hasGitMarker(n.path) {
+			repos = append(repos, n.path)
+			continue
+		}
+		if n.depth >= wbRepoDepth {
+			continue
+		}
+		ents, err := os.ReadDir(n.path)
+		if err != nil {
+			continue
+		}
+		for _, e := range ents {
+			budget--
+			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") || wbScanSkip[e.Name()] {
+				continue
+			}
+			p := filepath.Join(n.path, e.Name())
+			if seen[p] {
+				continue
+			}
+			seen[p] = true
+			queue = append(queue, node{p, n.depth + 1})
+		}
+	}
+	return repos, false
+}
+
+func (wb *workbench) handleRepos(w http.ResponseWriter, r *http.Request) {
+	if !trustedGet(w, r) {
+		return
+	}
+	roots := wb.repoScanRoots()
+	wb.repoMu.Lock()
+	if r.URL.Query().Get("refresh") == "1" || wb.repoAt.IsZero() || time.Since(wb.repoAt) > wbRepoTTL {
+		// Not the request's context: a page closed mid-scan would cache a partial list.
+		wb.repoCache, wb.repoTrunc = scanRepos(context.Background(), roots)
+		wb.repoAt = time.Now()
+	}
+	paths, truncated, at := wb.repoCache, wb.repoTrunc, wb.repoAt
+	wb.repoMu.Unlock()
+
+	out := make([]wbRepo, 0, len(paths))
+	for _, p := range paths {
+		if !wb.allowed(p) {
+			continue
+		}
+		out = append(out, wbRepo{Name: filepath.Base(p), Path: p, ID: wbItemID("dir", p)})
+	}
+	sort.Slice(out, func(i, j int) bool { return strings.ToLower(out[i].Path) < strings.ToLower(out[j].Path) })
+	var shown []string
+	for _, root := range roots {
+		if _, err := os.Stat(root); err == nil {
+			shown = append(shown, root)
+		}
+	}
+	writeJSON(w, map[string]any{
+		"repos":     out,
+		"roots":     shown,
+		"truncated": truncated,
+		"scannedAt": at.UnixMilli(),
+	})
+}
+
+// wbRepoStatus summarises `git status` for the Repositories list.
+type wbRepoStatus struct {
+	Branch    string `json:"branch"`
+	Upstream  string `json:"upstream,omitempty"`
+	Ahead     int    `json:"ahead"`
+	Behind    int    `json:"behind"`
+	Staged    int    `json:"staged"`
+	Changed   int    `json:"changed"` // tracked files with unstaged changes
+	Untracked int    `json:"untracked"`
+	Conflicts int    `json:"conflicts"`
+}
+
+// parseRepoStatus reads `git status --porcelain=v2 --branch`.
+func parseRepoStatus(out string) wbRepoStatus {
+	var st wbRepoStatus
+	for _, line := range strings.Split(out, "\n") {
+		switch {
+		case strings.HasPrefix(line, "# branch.head "):
+			st.Branch = strings.TrimPrefix(line, "# branch.head ")
+		case strings.HasPrefix(line, "# branch.upstream "):
+			st.Upstream = strings.TrimPrefix(line, "# branch.upstream ")
+		case strings.HasPrefix(line, "# branch.ab "):
+			fmt.Sscanf(strings.TrimPrefix(line, "# branch.ab "), "+%d -%d", &st.Ahead, &st.Behind)
+		case strings.HasPrefix(line, "1 "), strings.HasPrefix(line, "2 "):
+			if len(line) >= 4 {
+				if line[2] != '.' {
+					st.Staged++
+				}
+				if line[3] != '.' {
+					st.Changed++
+				}
+			}
+		case strings.HasPrefix(line, "u "):
+			st.Conflicts++
+		case strings.HasPrefix(line, "? "):
+			st.Untracked++
+		}
+	}
+	return st
+}
+
+// handleRepoStatus reports one repository's branch and pending changes. It
+// never takes the index lock (GIT_OPTIONAL_LOCKS=0), so a list of many
+// repositories cannot get in the way of git running in any of them.
+func (wb *workbench) handleRepoStatus(w http.ResponseWriter, r *http.Request) {
+	if !trustedGet(w, r) {
+		return
+	}
+	if gitDisabled {
+		fail(w, http.StatusServiceUnavailable, "git is disabled (-no-git)")
+		return
+	}
+	dir, err := expandPath(r.URL.Query().Get("path"), wb.cwd)
+	if err != nil || !hasGitMarker(dir) {
+		fail(w, http.StatusBadRequest, "not a git repository")
+		return
+	}
+	if !wb.allowed(dir) {
+		fail(w, http.StatusForbidden, wb.outsideRoots(dir))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), wbRepoStatusT)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "git", "-C", dir, "status", "--porcelain=v2", "--branch")
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0")
+	out, err := cmd.Output()
+	if err != nil {
+		msg := err.Error()
+		var ee *exec.ExitError
+		if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+			msg = strings.TrimSpace(strings.TrimPrefix(strings.SplitN(string(ee.Stderr), "\n", 2)[0], "fatal: "))
+		}
+		if ctx.Err() != nil {
+			msg = "git status took too long"
+		}
+		fail(w, http.StatusUnprocessableEntity, msg)
+		return
+	}
+	writeJSON(w, parseRepoStatus(string(out)))
 }

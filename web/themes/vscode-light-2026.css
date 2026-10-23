@@ -1,0 +1,50 @@
+/* VS Code's default light theme, "Light 2026" (VS Code 1.142).
+   Palette reference: microsoft/vscode/extensions/theme-defaults/themes/2026-light.json,
+   with the colours VS Code derives at runtime measured from the live workbench. */
+:root[data-theme="vscode-light-2026"] {
+  --theme-name: "Light 2026";
+  color-scheme: light;
+  --bg: #ffffff; --bg2: #fafafd; --bg3: #f0f1f2; --bg4: #e4e5e6;
+  --fg: #202020; --dim: #606060; --faint: #8a8a8a;
+  --line: #e4e5e6; --accent: #0069cc; --accent-fg: #0069cc; --on-accent: #ffffff;
+  --sel: #0069cc40; --mark: #0069cc1a; --mark-active: #895503; --cur: #eaeaea40;
+  --shadow: 0 0 12px #00000024;
+  --line-number: #606060; --cursor: #202020; --comment-style: normal;
+
+  --k: #cf222e; --kt: #267f99; --nf: #8250df; --nc: #953800; --nb: #0550ae;
+  --nv: #1f2328; --no: #0550ae; --na: #0550ae; --nt: #116329; --nd: #8250df;
+  --np: #0550ae; --s: #0a3069; --m: #098658; --o: #cf222e; --p: #202020;
+  --c: #6e7781; --cp: #cf222e; --err: #ad0707;
+  --gi: #587c0c; --gd: #ad0707;
+  --gi-bg: #9ccc2c26; --gd-bg: #ff000019;
+
+  --shell: #fafafd; --card-border: #e4e5e6; --sidebar-bg: #fafafd; --panel-bg: #fafafd; --editor-bg: #ffffff;
+  --tab-strip: #eaeaea; --tab-hover: #f2f3f4; --active-fg: #202020; --tab-active-fg: #202020; --tab-inactive-fg: #606060;
+  --icon-fg: #606060; --title-fg: #606060; --status-fg: #606060; --status-hover: #e3e3e5;
+  --focus: #0069cc; --sash: #0069cc; --highlight-fg: #0069cc;
+  --list-hover: #00000014; --list-active: #00000024; --list-selection: #dadada99; --list-active-fg: #202020;
+  --toolbar-hover: #0000001f; --activity-fg: #202020; --activity-muted: #606060; --activity-active-bg: #d6d6d6;
+  --badge-bg: #0069cc; --badge-fg: #ffffff;
+  --button-bg: #0069cc; --button-fg: #ffffff; --button-hover: #0063c1; --button-border: #0069cc;
+  --button2-bg: #eaeaea; --button2-fg: #202020; --button2-hover: #f2f3f4; --button2-border: #eaeaea;
+  --input-bg: #ffffff; --input-border: #d8d8d866; --input-placeholder: #999999;
+  --option-active-bg: #d6d6d6; --option-active-border: #f0f1f2;
+  --widget-bg: #fafafd; --widget-border: #e4e5e6; --quick-input-bg: #fafafd;
+  --menu-bg: #fafafd; --menu-border: #e4e5e6; --menu-sep: #eeeef1; --menu-hover: #00000014; --menu-focus-border: #0069cc;
+  --qi-focus-bg: #0069cc; --qi-focus-fg: #ffffff;
+  --kb-bg: #dddddd66; --kb-border: #cccccc66; --kb-bottom: #bbbbbb66; --kb-fg: #3b3b3b; --kb-shadow: #bbbbbb66;
+  --command-bg: #ffffff; --command-border: #d8d8d8ab; --command-hover-bg: #dadada4f; --command-hover-border: #d8d8d8;
+  --scrollbar: #646464bf; --scrollbar-hover: #646464d1; --scrollbar-active: #646464e0;
+  --letterpress: #f2f2f2; --desc-fg: #606060; --disabled-fg: #bbbbbb;
+  --warn: #bf8803; --info: #0063d3; --error-icon: #e51400;
+  --git-modified: #895503; --git-added: #587c0c; --git-untracked: #007100; --git-deleted: #ad0707;
+  --git-conflict: #ad0707; --git-renamed: #007100; --git-ignored: #8e8e90;
+  --code-bg: #eaeaea; --quote-bg: #eaeaea; --quote-border: #f0f1f2;
+
+  --editor-fg: #202020; --line-number-active: #202020;
+  --gutter-added: #587c0c; --gutter-modified: #005fb8; --gutter-deleted: #ad0707;
+  --diff-ins-text: #587c0c26; --diff-del-text: #ad070726; --diff-ins-line: #9ccc2c26; --diff-del-line: #ff000019;
+  --find-match: #0069cc40; --find-match-hl: #0069cc1a; --word-hl: #0069cc1a; --sel-hl: #0069cc26; --sel-inactive: #0069cc26;
+  --bracket-match: #0069cc40; --indent-guide: #d3d3d3; --indent-guide-active: #939393;
+  --whitespace: #60606040; --suggest-selected: #0069cc1a;
+}

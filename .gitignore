@@ -1,4 +1,6 @@
 dist/
+node_modules/
+web/dist/
 bench-repos/
 px0
 px0.exe
@@ -19,8 +21,6 @@ Thumbs.db
 
 # Build artifacts
 build/
-web/app.js
-web/workbench.js
 web/vendor/*.min.js
 web/vendor/*.min.js.gz
 

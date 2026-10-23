@@ -23,14 +23,14 @@ import (
 // pr.go handles git forge pull/merge request reviews: checking out a PR's
 // source tree into a throwaway git worktree, diffing it against the merge-base
 // with its target branch instead of HEAD, and letting the reviewer leave draft
-// comments and submit reviews or batch apply them with AI agents.
+// comments and submit reviews.
 //
 // Nothing persists past the process. The worktree lives in a system temp dir
 // and is removed in prSession.Close.
 
 // prSession is one checked-out PR review. Draft comments live only in
-// memory (mu-guarded), same lifetime as an agentJob -- never written to
-// disk, never surviving a restart.
+// memory (mu-guarded) for the life of the process; the workspace session
+// file keeps unsent drafts across a restart (see SetPR).
 type prSession struct {
 	mu sync.Mutex
 
@@ -53,8 +53,6 @@ type prSession struct {
 	// stays at the head the review started from, so a push moves your commits
 	// out of "Unpushed" without folding them into "PR changes".
 	pushedSHA string
-
-	scopeDir string // temp dir holding the diff files handed to threads; removed in Close
 
 	comments []prComment
 	nextID   int64
@@ -140,7 +138,7 @@ func (p *prSession) git() forgeGit {
 }
 
 // prBaseRef is where a session keeps its fetched copy of the PR's base
-// branch: the ref diffs are measured from and an agent rebase targets.
+// branch: the ref diffs and the sync state's ahead/behind are measured from.
 func prBaseRef(num int) string { return fmt.Sprintf("refs/px0/base/%d", num) }
 
 // fetchPRBase force-updates prBaseRef(num) from the PR's base branch,
@@ -314,9 +312,6 @@ func (p *prSession) Close() {
 	if p == nil {
 		return
 	}
-	if p.scopeDir != "" {
-		os.RemoveAll(p.scopeDir)
-	}
 	if p.srcRepo != "" {
 		exec.Command("git", "-C", p.srcRepo, "worktree", "remove", "--force", p.worktree).Run()
 		exec.Command("git", "-C", p.srcRepo, "update-ref", "-d", fmt.Sprintf("refs/px0/pr/%d", p.meta.Number)).Run()
@@ -387,26 +382,6 @@ func redactToken(s, token string) string {
 		return s
 	}
 	return strings.ReplaceAll(s, token, "***")
-}
-
-// writeScopeFile puts content in a per-session temp dir (outside the worktree, so
-// it never shows up as an untracked change) and returns its path, or "" if it
-// could not be written.
-func (p *prSession) writeScopeFile(name, content string) string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if p.scopeDir == "" {
-		dir, err := os.MkdirTemp("", "px0-prdiff-*")
-		if err != nil {
-			return ""
-		}
-		p.scopeDir = dir
-	}
-	path := filepath.Join(p.scopeDir, name)
-	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
-		return ""
-	}
-	return path
 }
 
 // errPRDiverged is returned by Pull when the checkout can't be fast-forwarded
@@ -520,9 +495,8 @@ func (p *prSession) Pull() (info string, err error) {
 }
 
 // FetchBase refreshes the session's copy of the PR's base branch and
-// returns its ref -- what an agent rebase or merge of the base targets. px0
-// fetches it itself, with the forge token, so the harness never needs
-// credentials (and never fetches at all).
+// returns its ref, so the sync state counts against the base as it is now.
+// px0 fetches it itself, with the forge token.
 func (p *prSession) FetchBase() (string, error) {
 	p.mu.Lock()
 	worktree, srcRepo, srcRemote := p.worktree, p.srcRepo, p.srcRemote
@@ -929,23 +903,18 @@ func (s *Server) handlePRMergeStatus(w http.ResponseWriter, r *http.Request) {
 	meta, writeAccess := p.meta, p.writeAccess
 	p.mu.Unlock()
 	root := s.ix.Root()
-	hasInstruction := false
-	if cfg := settings.Read(); cfg.GitCommitMessageInstruction != nil {
-		hasInstruction = strings.TrimSpace(*cfg.GitCommitMessageInstruction) != ""
-	}
 	writeJSON(w, map[string]any{
 		"status":   st,
 		"canMerge": st.CanMerge && writeAccess && p.token != "",
 		// The forge holds commits this checkout hasn't seen: merging now
 		// would land code nobody here reviewed. Pull first.
-		"stale":          st.HeadSHA != "" && st.HeadSHA != meta.HeadSHA,
-		"rewritten":      p.Rewritten(),
-		"inProgress":     gitOpInProgress(root),
-		"unpushed":       gitCountSince(root, meta.HeadSHA),
-		"defaults":       prMergeDefaults(meta, commits),
-		"commits":        commits,
-		"base":           meta.BaseRef,
-		"hasInstruction": hasInstruction,
+		"stale":      st.HeadSHA != "" && st.HeadSHA != meta.HeadSHA,
+		"rewritten":  p.Rewritten(),
+		"inProgress": gitOpInProgress(root),
+		"unpushed":   gitCountSince(root, meta.HeadSHA),
+		"defaults":   prMergeDefaults(meta, commits),
+		"commits":    commits,
+		"base":       meta.BaseRef,
 	})
 }
 
@@ -1018,64 +987,6 @@ func (s *Server) handlePRMerge(w http.ResponseWriter, r *http.Request) {
 		p.mu.Unlock()
 	}
 	writeJSON(w, map[string]any{"ok": true, "sha": res.SHA, "message": res.Message})
-}
-
-// handlePRMergeMessage has the harness write (or rewrite) the commit message
-// a squash or merge commit lands with, from the PR's commits and diff, the
-// user's commit message instructions in Settings, and any one-off
-// instruction typed in the dialog. It only writes text: px0 shows it in the
-// dialog, where it can still be edited before anything is merged.
-func (s *Server) handlePRMergeMessage(w http.ResponseWriter, r *http.Request) {
-	if !s.prOrFail(w) {
-		return
-	}
-	if !localPost(w, r) {
-		return
-	}
-	if !s.agentOrFail(w) {
-		return
-	}
-	var body struct {
-		Method      string `json:"method"`
-		Instruction string `json:"instruction"`
-		Title       string `json:"title"`
-		Message     string `json:"message"`
-	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil || (body.Method != MergeMethodSquash && body.Method != MergeMethodMerge) {
-		fail(w, http.StatusBadRequest, "method must be squash or merge")
-		return
-	}
-	p := s.pr
-	p.mu.Lock()
-	meta, from := p.meta, p.diffBase
-	p.mu.Unlock()
-	if !validSHA(from) {
-		fail(w, http.StatusConflict, "the PR's merge base is unresolved, so there is no diff to describe")
-		return
-	}
-	root := s.ix.Root()
-	instructions := []string{}
-	if cfg := settings.Read(); cfg.GitCommitMessageInstruction != nil {
-		if t := strings.TrimSpace(*cfg.GitCommitMessageInstruction); t != "" {
-			instructions = append(instructions, t)
-		}
-	}
-	if t := strings.TrimSpace(body.Instruction); t != "" {
-		instructions = append(instructions, t)
-	}
-	draft := strings.TrimSpace(strings.TrimSpace(body.Title) + "\n\n" + strings.TrimSpace(body.Message))
-	prompt := mergeMessagePrompt(body.Method, meta, s.prCommits(),
-		gitRangeStat(root, from, meta.HeadSHA), gitRangeDiff(root, from, meta.HeadSHA), draft, instructions)
-	job, err := s.agent.StartPrompt(body.Method+" message", prompt)
-	if err != nil {
-		code := http.StatusBadGateway
-		if errors.Is(err, errAgentNone) {
-			code = http.StatusBadRequest
-		}
-		fail(w, code, err.Error())
-		return
-	}
-	writeJSON(w, job)
 }
 
 // handleLaunchPR lets an already-running px0 open another PR without

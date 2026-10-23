@@ -1,18 +1,18 @@
 # System Architecture & Runtime Lifecycle
 
-This document describes the high-level architecture, startup pipeline, HTTP server, memory scavenging, and security model of `px0`.
+This document describes the high-level architecture, startup pipeline, HTTP server, memory scavenging, security model, and frontend structure of `px0`.
 
 ## 1. High-Level Design Principles
 
 px0 is engineered as an ultra-fast, zero-overhead code exploration console. Its architecture is guided by five foundational tenets:
 
-1. Edits Are Mostly Delegated: px0 navigates, searches, and inspects code. Large or multi-file changes are made by a coding harness px0 dispatches on request, one per non-overlapping line range so several can run at once (see [Harness Editing & Agent Dispatch](agent-editing.md)). Small direct edits and new files are the one exception: `/api/file/save` and `/api/fs/new` write content typed in the browser (see [File Editing](file-editing.md)).
-1. Single Static Binary Footprint: All frontend assets (HTML, CSS, JavaScript, icons, themes) are embedded directly into the Go binary at compile time via `go:embed`. px0 requires no Node.js, Python, or Ruby runtime, no external database, and no CGO dependencies.
+1. Explicit Writes Only: px0 navigates, searches, and inspects code, and writes to the workspace only when the user asks: saves, file operations (`/api/file/save`, `/api/fs/new`, `/api/fs/rename`, `/api/fs/delete`, see [File Editing](file-editing.md)), and git actions from the Source Control view (see [Git Integration](git-integration.md)).
+1. Single Static Binary Footprint: All frontend assets (HTML, the bundled JavaScript and CSS including Monaco, codicon fonts, themes) are embedded directly into the Go binary at compile time via `go:embed`. px0 requires no Node.js, Python, or Ruby runtime, no external database, and no CGO dependencies.
 1. Sub-Millisecond Responsiveness: The HTTP listener binds, serves the web UI, and opens the default browser in under 1 millisecond. Heavy operations (full directory indexing, git status checks, language server binary discovery) run asynchronously off the critical path.
-1. Stateless in the Workspace: px0 never writes configuration directories, temporary caches, or metadata files (e.g., `.px0/` or `.cache/`) into a workspace. Indexes and caches live in volatile memory. Outside the workspace it keeps the remembered harness choice and update/telemetry state under `~/.px0/` (or `$XDG_CONFIG_HOME/px0/`), and per-workspace session files (PR review drafts) and the workbench store under `~/.px0/` (or `$XDG_STATE_HOME/px0/`).
+1. Stateless in the Workspace: px0 never writes configuration directories, temporary caches, or metadata files (e.g., `.px0/` or `.cache/`) into a workspace. Indexes and caches live in volatile memory. Outside the workspace it keeps settings and update state under `~/.px0/` (or `$XDG_CONFIG_HOME/px0/`), and per-workspace session files (PR review drafts) and the workbench store under `~/.px0/` (or `$XDG_STATE_HOME/px0/`).
 1. Strict Memory Reclamation: Long-lived background processes should not hold idle RAM. When the user finishes a burst of queries, unused pages are proactively returned to the operating system.
 
-The browser's file tabs are managed in `web/src/tabs.js`. Tab context-menu actions and the tab close button share cache cleanup. A bulk close updates the browser view once after removing the selected tabs. Open tabs are not saved: a reload starts with no tabs open.
+Editor tabs live entirely in the browser (`web/src/editors.js`, see [§6](#6-frontend)). The tabs open in each editor group are saved per workspace in the browser's `localStorage` and reopened on the next load.
 
 ## 2. Startup Pipeline (<1 ms Critical Path)
 
@@ -58,7 +58,7 @@ sequenceDiagram
 1. Concurrent Tree Walk & Git Status: Indexing runs inside a background goroutine. A dedicated goroutine runs `gitStatus(ix.root)` in parallel with the file walk so that subprocess overhead overlaps the walk rather than adding to it.
 1. Background Language Server Discovery: `lsp.Available()` checks `$PATH` using `exec.LookPath` across standard binary locations asynchronously.
 
-The explorer expands folders through `/api/tree` on demand. Expand All skips ignored subtrees, keeps at most four directory requests in flight, and marks the header control busy while it runs. Tree refreshes and user navigation invalidate older requests before they can redraw stale folders; Collapse All clears open state immediately.
+The explorer (`web/src/explorer.js`) loads folders through `/api/tree` on demand: the root first, then the folders that were expanded last time, then each folder as it is opened.
 
 ## 3. HTTP Server & API Catalog
 
@@ -74,14 +74,13 @@ When hosted behind reverse proxies or multi-tenant review platforms, px0 support
 
 px0 is structured into decoupled core files and modular `internal/` packages:
 
-- **Root Package (`px0`)**: Contains the CLI entrypoint ([`main.go`](../../main.go)), HTTP routing and middleware ([`server.go`](../../server.go)), filesystem indexing and tree walk ([`index.go`](../../index.go)), search pipeline ([`search.go`](../../search.go)), Git operations and watcher ([`git.go`](../../git.go)), LSP client and supervisor ([`lsp.go`](../../lsp.go)), agent harnesses and multi-turn threads ([`agent.go`](../../agent.go)), PR review lifecycle ([`pr.go`](../../pr.go)), forge providers ([`forge.go`](../../forge.go)), and multi-repo workbench ([`workbench.go`](../../workbench.go)).
+- **Root Package (`px0`)**: Contains the CLI entrypoint ([`main.go`](../../main.go)), HTTP routing and middleware ([`server.go`](../../server.go)), filesystem indexing and tree walk ([`index.go`](../../index.go)), search pipeline ([`search.go`](../../search.go)), Git operations and watcher ([`git.go`](../../git.go)), LSP client and supervisor ([`lsp.go`](../../lsp.go)), PR review lifecycle ([`pr.go`](../../pr.go)), forge providers ([`forge.go`](../../forge.go)), and multi-repo workbench ([`workbench.go`](../../workbench.go)).
 - **`internal/fuzzy`**: Two-pass bounded fuzzy path finder and score ranking.
 - **`internal/ignore`**: Gitignore rule parsing and fast path glob matching.
 - **`internal/render`**: Windowed Chroma syntax highlighting, markdown rendering, and diff coloring.
 - **`internal/symbols`**: Regex-based multi-language declaration and symbol extraction.
 - **`internal/table`**: Delimiter sniffing and CSV/TSV table parsing.
 - **`internal/settings`**: Configuration schema, JSON persistence, and settings synchronization.
-- **`internal/telemetry`**: Anonymous event dispatch and usage telemetry.
 - **`internal/ui`**: Terminal formatting, ANSI colors, spinner animations, and TTY handling.
 - **`internal/metrics`**: Process memory, CPU, and goroutine monitoring.
 - **`internal/update`**: Self-update manifest checking, checksum verification, and binary replacement.
@@ -91,14 +90,18 @@ px0 is structured into decoupled core files and modular `internal/` packages:
 | Endpoint              | Method | Purpose                                                                 | Response Format                            |
 | --------------------- | ------ | ----------------------------------------------------------------------- | ------------------------------------------ |
 | `/`                   | `GET`  | Serves `web/index.html` (embedded)                                      | `text/html; charset=utf-8`                 |
-| `/static/*`           | `GET`  | Serves bundled JavaScript, CSS, and static assets                       | Asset MIME type                            |
+| `/static/*`           | `GET`  | Serves `web/dist/` (the Bun bundles, sent pre-gzipped) and `web/vendor/` | Asset MIME type                            |
 | `/static/themes.css`  | `GET`  | Concatenates all `web/themes/*.css` files in alphanumeric order         | `text/css; charset=utf-8`                  |
 | `/api/meta`           | `GET`  | Workspace metadata (root path, file count, index duration, git status)  | JSON (`{root, name, files, build_ms, git}`)|
 | `/api/metrics`        | `GET`  | Point-in-time process memory, CPU, and goroutine stats (polled via `/api/stream` SSE) | JSON (`{rssBytes, cpuUsage, goroutines}`)|
 | `/api/tree`           | `GET`  | Directory contents for the sidebar file explorer (`?dir=path`)          | JSON array of `Node` objects               |
 | `/api/file`           | `GET`  | Windowed, highlighted source file lines (`?path=...&start=0&count=500`) | JSON (`{lines, total, refine, markdown}`)  |
-| `/api/file/save`      | `POST` | Write edited file content, creating parent folders                      | JSON (`{ok, path, size}`)                  |
+| `/api/file/text`      | `GET`  | Exact file bytes for the editor (`?path=...`), with mtime and EOL style | JSON (`{path, text, size, mtime, binary, tooLarge, eol}`) |
+| `/api/file/save`      | `POST` | Write edited file content, creating parent folders (`409` on an `mtime` conflict) | JSON (`{ok, path, size, mtime}`)  |
+| `/api/file/stat`      | `POST` | Existence, mtime and size for up to 500 paths                           | JSON (`{files, truncated}`)                |
 | `/api/fs/new`         | `POST` | Create an empty file or a folder (`409` if it exists)                   | JSON (`{ok, path, type}`)                  |
+| `/api/fs/rename`      | `POST` | Rename or move a file or folder (`409` if the target exists)            | JSON (`{ok, path}`)                        |
+| `/api/fs/delete`      | `POST` | Delete a file or a folder (recursive)                                   | JSON (`{ok}`)                              |
 | `/api/close`          | `POST` | Release cached document handles and LSP files when tab closes          | JSON (`{ok: true}`)                        |
 | `/api/raw`            | `GET`  | Raw file content for copies and preview assets (attachment; nosniff)    | `application/octet-stream` or `image/*`    |
 | `/api/markdown`       | `GET`  | Converted HTML preview of `.md` / `.markdown` files via goldmark        | JSON (`{path, html}`)                      |
@@ -109,19 +112,20 @@ px0 is structured into decoupled core files and modular `internal/` packages:
 | `/api/def`            | `GET`  | Quick definition lookup fallback                                        | JSON array of matching definition locations|
 | `/api/diff`           | `GET`  | Unified diff of working tree vs. `HEAD` or commit ref (`?path=...&ref=...`) | JSON (`{path, diff, available}`)      |
 | `/api/gutter`         | `GET`  | Per-line change markers for code view gutter                            | JSON (`{added, modified, deleted}`)        |
-| `/api/stream`         | `GET`  | Unified SSE stream for real-time `git-status` and `metrics` events (aliased by `/api/git/stream`) | `text/event-stream`   |
+| `/api/stream`         | `GET`  | Unified SSE stream for real-time `git-status`, `tree`, and `metrics` events (aliased by `/api/git/stream`) | `text/event-stream`   |
 | `/api/git/refresh`    | `POST` | Triggers immediate git status check and returns status payload          | JSON (`{git, gitChanges, gitFiles, ...}`)  |
-| `/api/git/stage`      | `POST` | Stage a file (`?path=...`), or `"."` for all changes                   | JSON (`{ok, status}`)                      |
-| `/api/git/unstage`    | `POST` | Unstage a file (`?path=...`)                                            | JSON (`{ok, status}`)                      |
+| `/api/git/status`     | `GET`  | VS Code-style staged / changes / conflicts lists with branch and upstream | JSON (`{git, branch, head, staged, changes, conflicts, ...}`) |
+| `/api/git/show`       | `GET`  | File content at `HEAD`, `INDEX`, `BASE`, or a commit (`?path=...&ref=...`) | JSON (`{path, ref, exists, text, ...}`) |
+| `/api/git/stage`      | `POST` | Stage `{path}`, `{paths}`, or `{all: true}`                             | JSON (`{ok, status}`)                      |
+| `/api/git/unstage`    | `POST` | Unstage `{path}`, `{paths}`, or `{all: true}`                           | JSON (`{ok, status}`)                      |
+| `/api/git/discard`    | `POST` | Discard worktree changes for `{paths}` (untracked files are deleted)    | JSON (`{ok, status}`)                      |
 | `/api/git/hunk`       | `POST` | Stage, unstage, or discard an isolated diff hunk (`?path=...&action=...`) | JSON (`{ok: true}`)                     |
-| `/api/git/commit`     | `POST` | Commit staged changes (auto-stages unstaged modifications if none staged) | JSON (`{ok, sha}`)                      |
-| `/api/git/commit-message` | `POST` | Dispatch harness to write commit message from staged diff           | JSON job snapshot                          |
+| `/api/git/commit`     | `POST` | Commit staged changes (auto-stages everything if none staged), or `amend` | JSON (`{ok: true}`)                     |
 | `/api/git/push`       | `POST` | Push current branch (or PR head) to remote                              | JSON (`{ok: true}`)                        |
 | `/api/git/pull`       | `POST` | Fast-forward pull from upstream                                         | JSON (`{ok: true}`)                        |
-| `/api/git/sync-agent` | `POST` | Dispatch harness to rebase or merge diverged branches                   | JSON job snapshot                          |
-| `/api/git/sync-state` | `GET`  | Current branch divergence and in-progress rebase/merge state            | JSON (`{code, branch, upstream, ...}`)     |
-| `/api/git/abort`      | `POST` | Abort a rebase or merge in progress                                     | JSON (`{ok: true}`)                        |
-| `/api/git/log`        | `GET`  | Recent commits in active repository                                     | JSON array of recent commits               |
+| `/api/git/sync-state` | `GET`  | Current branch divergence and any rebase/merge/cherry-pick/revert in progress | JSON (`{code, branch, upstream, ...}`)     |
+| `/api/git/abort`      | `POST` | Abort the operation in progress                                         | JSON (`{ok: true}`)                        |
+| `/api/git/log`        | `GET`  | Recent commits in active repository (`limit` up to 200, `skip` to page) | JSON array of recent commits               |
 | `/api/unpushed`       | `GET`  | List commits on local branch not yet pushed to upstream                 | JSON (`{available, upstream, commits}`)    |
 | `/api/commitfiles`    | `GET`  | Files touched by a specific commit (`?sha=...`)                         | JSON array of file records                 |
 | `/api/commitdetail`   | `GET`  | Commit author, message, and diffstat summary (`?sha=...`)               | JSON commit details                        |
@@ -138,22 +142,9 @@ px0 is structured into decoupled core files and modular `internal/` packages:
 | `/api/lsp/start`      | `POST` | Starts language server for path or server name                          | JSON status payload                        |
 | `/api/lsp/stop`       | `POST` | Stops language server (`?server=...`) or all running servers            | JSON status payload                        |
 | `/api/lsp/servers`    | `GET`  | Lists relevant language servers for workspace with status and metrics   | JSON (`{enabled, anyRunning, servers}`)    |
-| `/api/agent/harnesses`| `GET`  | Detected coding harnesses and current choice                            | JSON (`{harnesses, selected, pinned, ...}`)|
-| `/api/agent/select`   | `POST` | Choose and remember a harness (`?name=...`)                             | JSON (`{harnesses, selected, pinned, ...}`)|
-| `/api/agent/edit`     | `POST` | Dispatch an instruction to the harness for a line range                 | JSON job snapshot                          |
-| `/api/agent/batch`    | `POST` | Dispatch a batch edit instruction across multiple ranges/files          | JSON job snapshot                          |
-| `/api/agent/job`      | `GET`  | Snapshot of job output and changed files                                | JSON job snapshot                          |
-| `/api/agent/cancel`   | `POST` | Stop running harness job                                                | JSON (`{cancelled: true}`)                 |
-| `/api/threads`        | `GET`  | List thread summaries for workspace                                     | JSON array of thread summaries             |
-| `/api/threads/get`    | `GET`  | Fetch thread details and turn history (`?id=...`)                       | JSON thread object                         |
-| `/api/threads/create` | `POST` | Create a new thread and run first turn                                  | JSON thread object                         |
-| `/api/threads/send`   | `POST` | Post follow-up message to an existing thread                            | JSON thread object                         |
-| `/api/threads/cancel` | `POST` | Cancel active turn on thread                                            | JSON (`{ok: true}`)                        |
-| `/api/threads/scope`  | `POST` | Update thread review scope in PR mode (`pr`, `mine`, `selection`)       | JSON (`{ok: true}`)                        |
-| `/api/threads/delete` | `POST` | Delete thread by ID                                                     | JSON (`{ok: true}`)                        |
-| `/api/threads/revert` | `POST` | Revert file changes made by a specific turn                             | JSON (`{ok, thread, reverted}`)            |
-| `/api/threads/stream` | `GET`  | SSE event feed for thread updates and turn outputs                      | `text/event-stream`                        |
 | `/api/settings`       | `GET` / `POST` | Read or update workspace/global configuration                   | JSON settings schema and values            |
+| `/api/terminal/list`, `/new`, `/kill`, `/rename` | `GET` / `POST` | Integrated terminal sessions (see [Integrated Terminal](terminal.md)) | JSON |
+| `/api/terminal/ws`    | WebSocket | One terminal's output and input                                 | binary output, JSON control messages |
 | `/api/pr/meta`        | `GET`  | PR metadata, merge-base, head SHA, and diffstat                         | JSON PR metadata                           |
 | `/api/pr/comments`    | `GET`  | Draft comments for active PR review session                             | JSON array of comments                     |
 | `/api/pr/comments/delete` | `POST` | Delete a draft PR comment by ID                                     | JSON (`{ok: true}`)                        |
@@ -164,9 +155,10 @@ px0 is structured into decoupled core files and modular `internal/` packages:
 | `/api/pr/comments/review-reply` | `POST` | Reply to an existing PR review comment thread                  | JSON (`{ok: true}`)                        |
 | `/api/pr/merge-status`| `GET`  | Fetch PR mergeability status and allowed merge methods                  | JSON (`{canMerge, state, methods, ...}`)   |
 | `/api/pr/merge`       | `POST` | Merge PR using chosen method (`merge`, `squash`, `rebase`)              | JSON (`{merged, message, sha}`)            |
-| `/api/pr/merge-message` | `POST`| Dispatch harness to generate PR merge/squash message                    | JSON job snapshot                          |
 | `/api/forge/connect`  | `POST` | Test and persist forge API access token                                 | JSON (`{ok, user, host}`)                  |
 | `/api/session`        | `GET` / `POST` | Load or persist workspace UI session state (tabs, scroll, drafts) | JSON session data                        |
+
+The current frontend does not call `/api/file`, `/api/close`, `/api/diff`, `/api/gutter`, `/api/git/refresh`, `/api/git/hunk`, `/api/git/sync-state`, `/api/commitdetail`, `/api/reindex`, `/api/lsp/calls`, `/api/lsp/setup`, `/api/lsp/install`, `/api/lsp/start`, `/api/lsp/stop`, `/api/lsp/servers`, `/api/pr/launch` or `/api/session`. They are still served.
 
 ## 4. Memory Management & Proactive Scavenging
 
@@ -205,7 +197,7 @@ func (s *Server) scavenge() {
 
 Because px0 uses a client-server architecture rather than embedding Electron:
 - **Host Server**: The Go backend daemon occupies ~20–30 MB RSS, handling indexing, symbol discovery, regex search, and git operations.
-- **Client Browser Tab**: The frontend web client runs in the user's existing browser, allocating ~80–150 MB for the DOM, V8 runtime, and GPU compositing. Memory is kept strictly bounded because px0's bespoke virtualized scroller mounts only ~60 active rows regardless of file size.
+- **Client Browser Tab**: The frontend runs in the user's existing browser. Monaco virtualizes its own rendering (only visible lines are in the DOM), and px0 keeps one model per open file, disposing it when the last tab showing it closes.
 - **Combined Impact**: Total system footprint is ~100–180 MB (~85–90% lower than the ~1,400 MB footprint of desktop Electron IDEs). On remote devboxes and containers, the host pays strictly the ~20–30 MB server cost.
 
 ### Gzip Buffer Pooling
@@ -237,17 +229,17 @@ Paths supplied by client queries are rigorously sanitized:
 When navigating code via LSP Go-to-Definition, targets often reside outside the workspace directory (e.g., standard library packages in `/usr/local/go/src` or cached crates in `~/.cargo/registry`).
 
 - Rather than opening up arbitrary filesystem reads, targets returned by the trusted LSP server are admitted into an in-memory allowlist: `extAllowed[canonicalPath] = true`.
-- `/api/file` and `/api/raw` permit reading external files only if the exact path exists in `extAllowed`.
+- The read endpoints that resolve paths with `resolvePath` (`/api/file/text`, `/api/file`, `/api/markdown`, ...) permit reading external files only if the exact path exists in `extAllowed`. `/api/raw` and every write endpoint use `safePath`, which has no external exception.
 - External paths can never be enumerated via `/api/tree` or searched via `/api/search`.
 
 ### Origin Verification for Installers
 
-The `/api/lsp/install` and `/api/lsp/start` endpoints execute shell commands (e.g., `go install ...` or `npm install -g ...`), and the `/api/agent/*` mutations run a coding harness. To guard against cross-origin attacks (such as a malicious website triggering command execution via JavaScript fetch while px0 is running in the background):
+The `/api/lsp/install` and `/api/lsp/start` endpoints execute shell commands (e.g., `go install ...` or `npm install -g ...`), and the file-writing and git endpoints change the workspace. To guard against cross-origin attacks (such as a malicious website triggering command execution via JavaScript fetch while px0 is running in the background):
 
 1. The request method must be `POST`.
 1. The request `Origin` header must match the request `Host` header.
 1. The `Host` header is validated to ensure it is strictly an IP address (`127.0.0.1`, `[::1]`) or `localhost`. This prevents DNS-rebinding attacks.
-1. The executed command is never supplied by the client; it is looked up exclusively from the hard-coded internal `lspRegistry`, or, for agent edits, from the harness the user picked (only the instruction text comes from the client).
+1. The executed command is never supplied by the client; it is looked up exclusively from the hard-coded internal `lspRegistry`.
 
 ### Content Security Policy (CSP)
 
@@ -272,9 +264,44 @@ px0 employs several complementary strategies to maintain an ultra-lean binary fo
 
 1. **Compile-time Trimming & Stripping**: Binaries are built with `-trimpath` and `-ldflags="-s -w"`, removing host filesystem paths, symbol tables, and DWARF debug sections.
 2. **Runtime Offloading of Heavy Vendor Assets**: Bulky third-party vendor assets (such as the 1.6 MB gzipped / 4 MB uncompressed Mermaid diagramming bundle) are excluded from `go:embed`. Instead, they are downloaded on-demand and cached in volatile/persistent user storage outside the repository, served via same-origin streaming handlers.
-3. **Frontend Bundle Minification**: Frontend assets (`web/app.js`) are bundled with `--minify` via Bun, reducing uncompressed client JavaScript from ~448 KB to ~250 KB.
+3. **Frontend Bundle Minification & Pre-compression**: `scripts/build-web.js` bundles the frontend with Bun (`--minify`) into `web/dist/` and gzips every text asset at level 9. Only the `.gz` files are embedded, and `handleStatic` sends them as is to browsers that accept gzip. Monaco's TypeScript, HTML, CSS and JSON language services are left out of the bundle (`scripts/gen-monaco.js`).
 4. **Standard Executable Integrity**: Executables are distributed as native, unpacked binaries rather than using runtime packers (e.g., UPX), preventing antivirus false positives, ensuring compatibility across all platforms (macOS Gatekeeper, OpenBSD W^X, BSDs, Windows ARM64), and enabling the operating system to share read-only executable pages across multiple running processes.
 
 ### Self-Update Integrity
 
 Before `px0 --update` executes or installs a release binary, it verifies the download against the SHA-256 digest in that release's `checksums.txt` asset. Missing, malformed, or mismatched checksum data aborts the update without replacing the current executable.
+
+## 6. Frontend
+
+The browser UI is a VS Code-style workbench built on [Monaco](https://microsoft.github.io/monaco-editor/). It is plain ES modules in [`web/src/`](../../web/src/), bundled by Bun; every module starts with a header comment saying what it owns. [`docs/agents/README.md`](../agents/README.md#5-frontend-architecture--code-map-for-agents) has the full module map.
+
+### Build
+
+[`scripts/build-web.js`](../../scripts/build-web.js) needs [Bun](https://bun.sh) (for Monaco's ESM build and its CSS and font imports) and writes `web/dist/`:
+
+| Entry | Output |
+| --- | --- |
+| `web/src/main.js` | `app.js`, `app.css`, `codicon-*.ttf` (the editor, loaded by `web/index.html`) |
+| Monaco's editor worker | `editor.worker.js` |
+| `web/src/workbench/main.js` | `workbench.js`, `workbench.css` (the workbench page, `web/workbench.html`) |
+
+Before bundling it runs [`scripts/gen-monaco.js`](../../scripts/gen-monaco.js), which writes `web/src/gen/monaco.js`: Monaco's own `editor.main.js` import list minus the TypeScript/JavaScript, HTML, CSS and JSON language services (their workers are about 9 MB, and language servers cover the same ground). Every editor contribution and every Monarch highlighter stays. JSON gets a small Monarch highlighter in `web/src/monaco.js`. Monaco, `@vscode/codicons` and xterm.js (`@xterm/xterm` and its fit, search, web-links, unicode11 and WebGL addons, for the [integrated terminal](terminal.md)) are the only npm dependencies (`package.json`), all build-time; `make web` installs them with `bun install` (or `npm install`) first.
+
+### Boot
+
+`boot()` in `web/src/main.js` reads `/api/meta` and `/api/settings`, applies the theme, builds the layout (`layout.js`), creates the first editor group (`editors.js`), registers the views (Explorer, Search, Source Control, Pull Request in a PR session, Repositories under the workbench), the Problems, Output and Terminal panels, the secondary side bar's Outline, the application and Accounts menus, the non-text viewers and every command (`actions.js`), loads git status, opens the event stream (`/api/stream`) and restores the session's tabs. A `?path=&line=` query (from `px0 file.go:42`) opens that file.
+
+### Structure
+
+- **Layout.** `layout.js` builds VS Code 1.142's modern shell: the activity bar, side bar, editor area, panel and secondary side bar are cards (`.part`) with rounded corners on the window background, separated by 4px sashes; `app.css` holds every size, taken from VS Code's stylesheets. Views, panels (with a title `widget` and `actions`), the application menu and the status bar items register into it.
+- **Commands.** Every action is a command `{id, title, category, keys, when, run}` in `commands.js`, registered by `actions.js`. Menus, buttons, the Command Palette and the keyboard all run commands by ID. `initKeybindings` listens on the window in the capture phase, before Monaco sees a key, and handles two-part chords (`Mod+K Mod+S`).
+- **Documents.** `models.js` keeps one Monaco model per open file, shared by every editor showing it, with the file's `mtime` for conflict detection (see [File Editing](file-editing.md)). Read-only models of a file at `HEAD`, `INDEX`, `BASE` or a commit come from `/api/git/show` for the diff editors.
+- **Editors.** `editors.js` lays out editor groups side by side; each group owns one Monaco code editor and one diff editor and swaps models and view state as tabs change. Tabs are `file`, `diff` or `view` inputs; `view` tabs (Markdown preview, table, image, binary, Settings, settings.json, Keyboard Shortcuts) are drawn by viewers registered with `registerViewer`.
+- **Server state.** `git.js` holds git status for the whole UI; `lsp.js` registers Monaco hover, definition, reference and document-symbol providers backed by `/api/lsp/*`; `palette.js` and `search.js` call `/api/find` and `/api/search`.
+- **Events.** Modules talk through a small event bus in `util.js` (`emit`/`on`): `stream:git`, `stream:tree` and `stream:metrics` from the server's event stream, `doc:dirty`, `doc:saved`, `git:changed`, `editor:active`, `settings:changed`, `theme:changed`, ...
+- **Base path.** `web/index.html` has a `<base href>` the server rewrites to its base path, and `api.js` resolves every request relative to it, so the same bundle works on its own port, under `-base-path`, and behind the workbench proxy (`/w/<id>/`).
+- **Persistence.** UI state is kept in `localStorage` under `px0.*` keys (`pref`/`setPref` in `util.js`): layout, open tabs per workspace, expanded folders, Search options, the draft commit message, recent files and commands, the theme. Settings live on the server (`/api/settings`).
+
+### Tests
+
+`scripts/check-web.js` (`make web-check`, `npm run check`) syntax-checks every module under `web/src/` with `node --check`, verifies that relative imports resolve, and runs `bun test web/src/`. The unit tests are `web/src/*.test.js` (`linediff.test.js` for the quick-diff line diff, `quickinput.test.js` for fuzzy matching and highlighting). They test pure functions that need no DOM or Monaco, so they run under Bun directly.

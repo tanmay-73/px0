@@ -49,18 +49,6 @@ func FormatBytes(b int64) string {
 	return fmt.Sprintf("%.1f MB", float64(b)/(1024*1024))
 }
 
-// VerbosePrompt prints the prompt lines in verbose mode.
-func VerbosePrompt(jobID int64, harness, prompt string, w io.Writer) {
-	if !Verbose || Quiet {
-		return
-	}
-	lines := strings.Split(strings.TrimRight(prompt, "\n"), "\n")
-	fmt.Fprintf(w, "  %s %s\n", Dim("prompt:", w), Faint(fmt.Sprintf("(%d lines)", len(lines)), w))
-	for _, l := range lines {
-		fmt.Fprintf(w, "  %s %s\n", Faint("│", w), Dim(l, w))
-	}
-}
-
 func useColor(w io.Writer) bool {
 	if ForcedColor != nil {
 		return *ForcedColor

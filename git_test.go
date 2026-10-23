@@ -735,7 +735,7 @@ func TestGitStatusAgainstAndPRDiff(t *testing.T) {
 		t.Errorf("unexpected diff against baseSHA:\n%s", diffBody)
 	}
 
-	// Now simulate an external terminal agent modifying foo.go
+	// Now simulate an external editor modifying foo.go
 	write("foo.go", "package main\n\nfunc Foo() int { return 99 }\n")
 
 	// ix.UpdateGitStatus() must catch the modification
@@ -1005,13 +1005,10 @@ func TestGitFFOnlyPull(t *testing.T) {
 	}
 
 	// The refused pull's fetch already landed, so the sync state the panel
-	// offers a rebase/merge from counts the incoming commit.
+	// reports counts the incoming commit.
 	st := (&Server{}).gitSyncState(cloneB)
 	if st.Branch != "main" || st.Upstream != "origin/main" || st.Ahead != 1 || st.Behind != 1 || st.InProgress != "" || st.Dirty {
 		t.Fatalf("unexpected sync state after a diverged pull: %+v", st)
-	}
-	if p := gitSyncPrompt("rebase", st); !strings.Contains(p, "can't fast-forward onto origin/main") || !strings.Contains(p, "Run rebase") || !strings.Contains(p, "do not push") {
-		t.Fatalf("rebase prompt is missing the situation or the no-push rule:\n%s", p)
 	}
 
 	// A local edit to the same line as the incoming one stops a rebase on a
@@ -1254,7 +1251,7 @@ func TestPRReviewerChangesInIndex(t *testing.T) {
 	}
 }
 
-func TestGitStagedFilesStatAndDiff(t *testing.T) {
+func TestGitStagedFiles(t *testing.T) {
 	if !gitInstalled() {
 		t.Skip("git not installed")
 	}
@@ -1289,58 +1286,6 @@ func TestGitStagedFilesStatAndDiff(t *testing.T) {
 	}
 	if !hasApp || !hasLock {
 		t.Fatalf("staged files missing expected entries: %v", files)
-	}
-
-	stat := gitStagedStat(dir)
-	if !strings.Contains(stat, "app.go") || !strings.Contains(stat, "package-lock.json") {
-		t.Fatalf("diffstat missing expected files:\n%s", stat)
-	}
-
-	// Staged diff should exclude package-lock.json because app.go has changes
-	diff := gitStagedDiff(dir)
-	if !strings.Contains(diff, "app.go") {
-		t.Fatalf("diff expected to contain app.go diff:\n%s", diff)
-	}
-	if strings.Contains(diff, "package-lock.json") {
-		t.Fatalf("diff expected to exclude package-lock.json when other changes exist:\n%s", diff)
-	}
-
-	// Commit app.go, leaving only package-lock.json staged: should fall back to showing package-lock.json
-	gitTestRun(t, dir, "commit", "-m", "commit app.go", "app.go")
-	diffOnlyLock := gitStagedDiff(dir)
-	if !strings.Contains(diffOnlyLock, "package-lock.json") {
-		t.Fatalf("diff expected to fallback to package-lock.json when only lockfiles staged:\n%s", diffOnlyLock)
-	}
-}
-
-func TestGitStagedDiffTruncation(t *testing.T) {
-	if !gitInstalled() {
-		t.Skip("git not installed")
-	}
-	dir := t.TempDir()
-	gitTestRun(t, dir, "init", "-b", "main")
-	for _, cfg := range [][2]string{{"user.email", "t@example.com"}, {"user.name", "T"}, {"commit.gpgsign", "false"}} {
-		gitTestRun(t, dir, "config", cfg[0], cfg[1])
-	}
-	os.WriteFile(filepath.Join(dir, "init.txt"), []byte("init\n"), 0o644)
-	gitTestRun(t, dir, "add", "init.txt")
-	gitTestRun(t, dir, "commit", "-m", "init")
-
-	// Write a 50 KB file (> 32 KB limit)
-	var large bytes.Buffer
-	for i := 0; i < 2000; i++ {
-		fmt.Fprintf(&large, "line %04d: lots of content to make the diff exceed the 32KB cap\n", i)
-	}
-	os.WriteFile(filepath.Join(dir, "large.txt"), large.Bytes(), 0o644)
-	gitTestRun(t, dir, "add", "large.txt")
-
-	diff := gitStagedDiff(dir)
-	if !strings.Contains(diff, "[Diff truncated: showing first 32KB") {
-		t.Fatalf("expected diff to be truncated with notice, got %d bytes without notice", len(diff))
-	}
-	// The diff output should be around 32KB + truncation message
-	if len(diff) > 34*1024 {
-		t.Fatalf("diff size %d exceeded expected bound", len(diff))
 	}
 }
 
@@ -2028,76 +1973,6 @@ func TestGitApplyHunk(t *testing.T) {
 	}
 }
 
-func TestGitSnapshotAndRestore(t *testing.T) {
-	if !gitInstalled() {
-		t.Skip("git not installed")
-	}
-	root := t.TempDir()
-	if r, err := filepath.EvalSymlinks(root); err == nil {
-		root = r
-	}
-	run := func(args ...string) {
-		cmd := exec.Command("git", args...)
-		cmd.Dir = root
-		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
-		if out, err := cmd.CombinedOutput(); err != nil {
-			t.Fatalf("git %v: %v\n%s", args, err, out)
-		}
-	}
-	fileA := filepath.Join(root, "a.go")
-	if err := os.WriteFile(fileA, []byte("package a\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	run("init")
-	run("config", "user.email", "t@example.com")
-	run("config", "user.name", "T")
-	run("config", "commit.gpgsign", "false")
-	run("add", "a.go")
-	run("commit", "-qm", "init")
-
-	// Make a dirty unstaged edit before snapshot
-	if err := os.WriteFile(fileA, []byte("package a\n// pre-turn edit\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	beforeSHA := gitSnapshotWorktree(root)
-	if beforeSHA == "" {
-		t.Fatal("gitSnapshotWorktree returned empty SHA")
-	}
-
-	// Simulate an agent turn modifying a.go and creating b.go
-	fileB := filepath.Join(root, "b.go")
-	if err := os.WriteFile(fileA, []byte("package a\n// agent turn edit\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(fileB, []byte("package a\n// new file\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	afterSHA := gitSnapshotWorktree(root)
-	if afterSHA == "" || afterSHA == beforeSHA {
-		t.Fatalf("afterSHA = %q, beforeSHA = %q", afterSHA, beforeSHA)
-	}
-
-	diffText := gitDiffBetween(root, "a.go", beforeSHA, afterSHA)
-	if !strings.Contains(diffText, "+// agent turn edit") {
-		t.Fatalf("unexpected diff between snapshots: diff=%q", diffText)
-	}
-
-	// Restore both files to beforeSHA
-	if err := gitRestoreSnapshotPaths(root, beforeSHA, []string{"a.go", "b.go"}); err != nil {
-		t.Fatalf("gitRestoreSnapshotPaths: %v", err)
-	}
-	gotA, err := os.ReadFile(fileA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(gotA) != "package a\n// pre-turn edit\n" {
-		t.Fatalf("a.go after restore = %q, want pre-turn state", string(gotA))
-	}
-	if _, err := os.Stat(fileB); !os.IsNotExist(err) {
-		t.Fatalf("expected b.go to be removed on restore, got err=%v", err)
-	}
-}
-
 func TestIndexTouchPath(t *testing.T) {
 	root := t.TempDir()
 	if err := os.WriteFile(filepath.Join(root, "existing.go"), []byte("package main\n"), 0o644); err != nil {
@@ -2254,5 +2129,595 @@ func TestGitCommitAutoStage(t *testing.T) {
 	}
 	if strings.TrimSpace(string(out)) != "auto staged commit" {
 		t.Fatalf("expected commit subject 'auto staged commit', got %q", strings.TrimSpace(string(out)))
+	}
+}
+
+func TestCompareTwoFiles(t *testing.T) {
+	if !gitBinary() {
+		t.Skip("git not installed")
+	}
+	s, root := newTestServer(t)
+	os.WriteFile(filepath.Join(root, "greet2.go"), []byte("package main\n\nimport \"fmt\"\n\nfunc greet(s string) {\n\tfmt.Println(\"hello\", s)\n}\n"), 0o644)
+
+	code, body := get(t, s, "/api/diff?path=greet2.go&compare=greet.go")
+	if code != http.StatusOK {
+		t.Fatalf("status %d: %v", code, body)
+	}
+	if body["compare"] != "greet.go" || body["path"] != "greet2.go" || body["identical"] != false || body["binary"] != false {
+		t.Fatalf("got %v", body)
+	}
+	hunks, _ := body["hunks"].([]any)
+	if len(hunks) != 1 {
+		t.Fatalf("want 1 hunk, got %v", body["hunks"])
+	}
+	var adds, dels int
+	for _, r := range hunks[0].(map[string]any)["rows"].([]any) {
+		switch r.(map[string]any)["type"] {
+		case "add":
+			adds++
+		case "del":
+			dels++
+		}
+	}
+	if adds != 1 || dels != 1 {
+		t.Fatalf("want one line changed, got +%d -%d", adds, dels)
+	}
+
+	if _, body := get(t, s, "/api/diff?path=main.go&compare=main.go"); body["identical"] != true {
+		t.Fatalf("same file: %v", body)
+	}
+	if code, _ := get(t, s, "/api/diff?path=main.go&compare=sub"); code != http.StatusBadRequest {
+		t.Fatalf("directory: got %d", code)
+	}
+	if code, _ := get(t, s, "/api/diff?path=main.go&compare=../../etc/passwd"); code != http.StatusBadRequest {
+		t.Fatalf("outside the workspace: got %d", code)
+	}
+	if code, _ := get(t, s, "/api/diff?path=main.go&compare=missing.go"); code != http.StatusNotFound {
+		t.Fatalf("missing file: got %d", code)
+	}
+}
+
+func TestTreeMarksNestedRepositories(t *testing.T) {
+	s, root := newTestServer(t)
+	os.MkdirAll(filepath.Join(root, "sub", ".git"), 0o755)
+	_, body := get(t, s, "/api/tree?dir=")
+	for _, c := range body["children"].([]any) {
+		n := c.(map[string]any)
+		repo, _ := n["repo"].(bool)
+		if want := n["name"] == "sub"; repo != want {
+			t.Fatalf("%v: repo=%v", n["name"], repo)
+		}
+	}
+}
+
+func TestParseStatusV2(t *testing.T) {
+	out := strings.Join([]string{
+		"# branch.oid 4d1d5c76ee28d88af001ed3f5f8f66f110cde5ed",
+		"# branch.head main",
+		"# branch.upstream origin/main",
+		"# branch.ab +2 -3",
+		"1 .M N... 100644 100644 100644 aaaa aaaa web/a.txt",
+		"1 MM N... 100644 100644 100644 aaaa bbbb web/both file.txt",
+		"1 A. N... 000000 100644 100644 0000 cccc web/new.txt",
+		"1 .D N... 100644 100644 000000 aaaa aaaa web/gone.txt",
+		"2 R. N... 100644 100644 100644 aaaa aaaa R100 web/to.txt", "web/from.txt",
+		"2 RM N... 100644 100644 100644 aaaa aaaa R90 web/moved.txt", "outside/orig.txt",
+		"u UU N... 100644 100644 100644 100644 aaaa bbbb cccc web/conflict.txt",
+		"? web/untracked dir/x.txt",
+		"? elsewhere.txt",
+		"",
+	}, "\x00")
+	// Served from web/: paths outside it are dropped, the rest re-rooted.
+	key := func(p string) (string, bool) {
+		if !strings.HasPrefix(p, "web/") {
+			return "", false
+		}
+		return p[4:], true
+	}
+	rep := parseStatusV2([]byte(out), key, 100)
+	if !rep.Git || rep.Branch != "main" || rep.Detached || rep.Head != "4d1d5c7" || rep.HeadFull != "4d1d5c76ee28d88af001ed3f5f8f66f110cde5ed" ||
+		rep.Upstream != "origin/main" || rep.Ahead != 2 || rep.Behind != 3 || rep.Truncated {
+		t.Fatalf("header = %+v", rep)
+	}
+	wantStaged := []GitChange{
+		{Path: "both file.txt", Status: "M"},
+		{Path: "new.txt", Status: "A"},
+		{Path: "to.txt", Status: "R", From: "from.txt"},
+		{Path: "moved.txt", Status: "R"}, // its original path is outside the served root
+	}
+	wantChanges := []GitChange{
+		{Path: "a.txt", Status: "M"},
+		{Path: "both file.txt", Status: "M"},
+		{Path: "gone.txt", Status: "D"},
+		{Path: "moved.txt", Status: "M"},
+		{Path: "untracked dir/x.txt", Status: "U"},
+	}
+	wantConflicts := []GitChange{{Path: "conflict.txt", Status: "UU"}}
+	if fmt.Sprint(rep.Staged) != fmt.Sprint(wantStaged) {
+		t.Errorf("staged = %+v\nwant     %+v", rep.Staged, wantStaged)
+	}
+	if fmt.Sprint(rep.Changes) != fmt.Sprint(wantChanges) {
+		t.Errorf("changes = %+v\nwant      %+v", rep.Changes, wantChanges)
+	}
+	if fmt.Sprint(rep.Conflicts) != fmt.Sprint(wantConflicts) {
+		t.Errorf("conflicts = %+v", rep.Conflicts)
+	}
+
+	// Unborn and detached heads, and the cap.
+	rep = parseStatusV2([]byte("# branch.oid (initial)\x00# branch.head (detached)\x00? a\x00? b\x00? c\x00"), func(p string) (string, bool) { return p, true }, 2)
+	if rep.Head != "" || rep.HeadFull != "" || !rep.Detached || rep.Branch != "" || len(rep.Changes) != 2 || !rep.Truncated {
+		t.Fatalf("unborn/detached/capped = %+v", rep)
+	}
+}
+
+func BenchmarkParseStatusV2(b *testing.B) {
+	var sb strings.Builder
+	sb.WriteString("# branch.oid 4d1d5c76ee28d88af001ed3f5f8f66f110cde5ed\x00# branch.head main\x00")
+	for i := 0; i < 2000; i++ {
+		fmt.Fprintf(&sb, "1 MM N... 100644 100644 100644 aaaa bbbb src/pkg%d/file%d.go\x00? build/out%d.o\x00", i%40, i, i)
+	}
+	out := []byte(sb.String())
+	key := func(p string) (string, bool) { return p, true }
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		parseStatusV2(out, key, gitStatusMax)
+	}
+}
+
+// scmServer serves gitRepo's dirtied repository.
+func scmServer(t *testing.T) (*Server, string) {
+	t.Helper()
+	if !gitInstalled() {
+		t.Skip("git not installed")
+	}
+	root := gitRepo(t)
+	ix := NewIndex(root)
+	ix.Build()
+	s := NewServer(ix, nil)
+	t.Cleanup(s.gitWatcher.Stop)
+	return s, root
+}
+
+// gitStatusOf fetches /api/git/status.
+func gitStatusOf(t *testing.T, s *Server) GitStatusReport {
+	t.Helper()
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/git/status", nil))
+	if rec.Code != 200 {
+		t.Fatalf("git/status: %d %s", rec.Code, rec.Body.String())
+	}
+	var rep GitStatusReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &rep); err != nil {
+		t.Fatal(err)
+	}
+	return rep
+}
+
+// changeIn finds path in a Source Control group.
+func changeIn(list []GitChange, path string) (GitChange, bool) {
+	for _, c := range list {
+		if c.Path == path {
+			return c, true
+		}
+	}
+	return GitChange{}, false
+}
+
+func TestGitStatusEndpoint(t *testing.T) {
+	s, root := scmServer(t)
+	// Staged and then edited again: in both groups.
+	os.WriteFile(filepath.Join(root, "add.go"), []byte("added, then edited\n"), 0o644)
+
+	rep := gitStatusOf(t, s)
+	if !rep.Git || rep.Branch == "" || rep.Detached || len(rep.Head) != 7 || rep.Operation != "" || rep.Truncated {
+		t.Fatalf("header = %+v", rep)
+	}
+	for _, c := range []struct {
+		list       []GitChange
+		path, want string
+		from       string
+	}{
+		{rep.Staged, "add.go", "A", ""},
+		{rep.Staged, "sub/ren2.go", "R", "sub/ren.go"},
+		{rep.Changes, "add.go", "M", ""},
+		{rep.Changes, "sub/mod.go", "M", ""},
+		{rep.Changes, "del.go", "D", ""},
+		{rep.Changes, "untr.go", "U", ""},
+	} {
+		got, ok := changeIn(c.list, c.path)
+		if !ok || got.Status != c.want || got.From != c.from {
+			t.Errorf("%s: got %+v (found %v), want %s from %q", c.path, got, ok, c.want, c.from)
+		}
+	}
+	if _, ok := changeIn(rep.Staged, "sub/mod.go"); ok {
+		t.Error("an unstaged edit is listed as staged")
+	}
+	if len(rep.Conflicts) != 0 {
+		t.Errorf("conflicts = %+v", rep.Conflicts)
+	}
+
+	// Not a repository: git false, every group an empty list.
+	plain, _ := newTestServer(t)
+	rec := httptest.NewRecorder()
+	plain.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/git/status", nil))
+	if body := rec.Body.String(); !strings.Contains(body, `"git":false`) || !strings.Contains(body, `"staged":[]`) || !strings.Contains(body, `"changes":[]`) || !strings.Contains(body, `"conflicts":[]`) {
+		t.Fatalf("outside a repository: %s", body)
+	}
+}
+
+func TestGitStatusUnbornAndConflict(t *testing.T) {
+	if !gitInstalled() {
+		t.Skip("git not installed")
+	}
+	root := t.TempDir()
+	if r, err := filepath.EvalSymlinks(root); err == nil {
+		root = r
+	}
+	gitTestRun(t, root, "init", "-q", "-b", "main")
+	for _, c := range [][2]string{{"user.email", "t@example.com"}, {"user.name", "T"}, {"commit.gpgsign", "false"}} {
+		gitTestRun(t, root, "config", c[0], c[1])
+	}
+	os.WriteFile(filepath.Join(root, "f.txt"), []byte("base\n"), 0o644)
+	gitTestRun(t, root, "add", "f.txt")
+
+	rep := gitStatusReport(root)
+	if !rep.Git || rep.Branch != "main" || rep.Head != "" || rep.Detached {
+		t.Fatalf("unborn header = %+v", rep)
+	}
+	if c, ok := changeIn(rep.Staged, "f.txt"); !ok || c.Status != "A" {
+		t.Fatalf("unborn staged = %+v", rep.Staged)
+	}
+
+	// Two branches edit the same line: the merge stops on a conflict.
+	gitTestRun(t, root, "commit", "-qm", "base")
+	gitTestRun(t, root, "checkout", "-qb", "other")
+	os.WriteFile(filepath.Join(root, "f.txt"), []byte("theirs\n"), 0o644)
+	gitTestRun(t, root, "commit", "-qam", "theirs")
+	gitTestRun(t, root, "checkout", "-q", "main")
+	os.WriteFile(filepath.Join(root, "f.txt"), []byte("ours\n"), 0o644)
+	gitTestRun(t, root, "commit", "-qam", "ours")
+	if out, err := exec.Command("git", "-C", root, "merge", "other").CombinedOutput(); err == nil {
+		t.Fatalf("expected a conflict:\n%s", out)
+	}
+	rep = gitStatusReport(root)
+	if c, ok := changeIn(rep.Conflicts, "f.txt"); !ok || c.Status != "UU" || rep.Operation != "merge" {
+		t.Fatalf("conflict = %+v, operation %q", rep.Conflicts, rep.Operation)
+	}
+	if err := gitAbortOp(root); err != nil {
+		t.Fatal(err)
+	}
+
+	// A cherry-pick stopped the same way is named, and aborts.
+	if out, err := exec.Command("git", "-C", root, "cherry-pick", "other").CombinedOutput(); err == nil {
+		t.Fatalf("expected a conflict:\n%s", out)
+	}
+	if op := gitOpInProgress(root); op != "cherry-pick" {
+		t.Fatalf("operation = %q, want cherry-pick", op)
+	}
+	if err := gitAbortOp(root); err != nil || gitOpInProgress(root) != "" {
+		t.Fatalf("abort cherry-pick: %v, left %q", err, gitOpInProgress(root))
+	}
+}
+
+func TestGitStageUnstageMany(t *testing.T) {
+	s, root := scmServer(t)
+	post := func(path, body string) map[string]any {
+		t.Helper()
+		rec := postJSON(t, s, path, body)
+		if rec.Code != 200 {
+			t.Fatalf("%s %s: %d %s", path, body, rec.Code, rec.Body.String())
+		}
+		var m map[string]any
+		json.Unmarshal(rec.Body.Bytes(), &m)
+		return m
+	}
+
+	// A modification, a deletion and an untracked file at once.
+	m := post("/api/git/stage", `{"paths":["sub/mod.go","del.go","untr.go"]}`)
+	if m["git"] != true { // the same status payload stage has always returned
+		t.Fatalf("stage response = %v", m)
+	}
+	rep := gitStatusOf(t, s)
+	for path, want := range map[string]string{"sub/mod.go": "M", "del.go": "D", "untr.go": "A"} {
+		if c, ok := changeIn(rep.Staged, path); !ok || c.Status != want {
+			t.Errorf("staged %s = %+v, want %s", path, c, want)
+		}
+		if _, ok := changeIn(rep.Changes, path); ok {
+			t.Errorf("%s is still listed as a change", path)
+		}
+	}
+
+	post("/api/git/unstage", `{"paths":["sub/mod.go","untr.go"]}`)
+	rep = gitStatusOf(t, s)
+	if _, ok := changeIn(rep.Staged, "sub/mod.go"); ok {
+		t.Error("sub/mod.go still staged")
+	}
+	if c, ok := changeIn(rep.Changes, "untr.go"); !ok || c.Status != "U" {
+		t.Errorf("untr.go should be untracked again: %+v", rep.Changes)
+	}
+
+	post("/api/git/stage", `{"all":true}`)
+	if rep = gitStatusOf(t, s); len(rep.Changes) != 0 {
+		t.Fatalf("stage all left changes: %+v", rep.Changes)
+	}
+	post("/api/git/unstage", `{"all":true}`)
+	if rep = gitStatusOf(t, s); len(rep.Staged) != 0 {
+		t.Fatalf("unstage all left staged: %+v", rep.Staged)
+	}
+
+	// The single-path form still works, and a file named like a glob is
+	// only ever itself.
+	os.WriteFile(filepath.Join(root, "[x].go"), []byte("x\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "x.go"), []byte("x\n"), 0o644)
+	post("/api/git/stage", `{"path":"[x].go"}`)
+	rep = gitStatusOf(t, s)
+	if _, ok := changeIn(rep.Staged, "[x].go"); !ok {
+		t.Error("[x].go not staged")
+	}
+	if _, ok := changeIn(rep.Staged, "x.go"); ok {
+		t.Error("staging [x].go staged x.go as well")
+	}
+
+	for _, body := range []string{`{}`, `{"paths":["../x"]}`, `not json`} {
+		if rec := postJSON(t, s, "/api/git/stage", body); rec.Code != http.StatusBadRequest {
+			t.Errorf("stage %s: got %d, want 400", body, rec.Code)
+		}
+	}
+}
+
+func TestGitUnstageManyOnUnbornHead(t *testing.T) {
+	if !gitInstalled() {
+		t.Skip("git not installed")
+	}
+	root := t.TempDir()
+	gitTestRun(t, root, "init", "-q")
+	os.WriteFile(filepath.Join(root, "a.txt"), []byte("a\n"), 0o644)
+	os.WriteFile(filepath.Join(root, "b.txt"), []byte("b\n"), 0o644)
+	if err := gitStagePaths(root, []string{"a.txt", "b.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := gitUnstagePaths(root, []string{"a.txt", "b.txt"}); err != nil {
+		t.Fatal(err)
+	}
+	if staged := gitStagedPaths(root); len(staged) != 0 {
+		t.Fatalf("still staged: %v", staged)
+	}
+	if _, err := os.Stat(filepath.Join(root, "a.txt")); err != nil {
+		t.Fatal("unstaging touched the working tree")
+	}
+}
+
+func TestGitDiscard(t *testing.T) {
+	s, root := scmServer(t)
+	read := func(rel string) string {
+		b, err := os.ReadFile(filepath.Join(root, filepath.FromSlash(rel)))
+		if err != nil {
+			return "<missing>"
+		}
+		return string(b)
+	}
+	// add.go is staged; an edit on top is what Discard throws away.
+	os.WriteFile(filepath.Join(root, "add.go"), []byte("added, then edited\n"), 0o644)
+	os.MkdirAll(filepath.Join(root, "newdir", "deeper"), 0o755)
+	os.WriteFile(filepath.Join(root, "newdir", "deeper", "n.go"), []byte("n\n"), 0o644)
+	os.WriteFile(filepath.Join(root, ".gitignore"), []byte("*.log\n"), 0o644)
+	gitTestRun(t, root, "add", ".gitignore")
+	os.WriteFile(filepath.Join(root, "newdir", "keep.log"), []byte("ignored\n"), 0o644)
+
+	rec := postJSON(t, s, "/api/git/discard", `{"paths":["sub/mod.go","del.go","add.go","untr.go","newdir"]}`)
+	if rec.Code != 200 {
+		t.Fatalf("discard: %d %s", rec.Code, rec.Body.String())
+	}
+	var m map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &m)
+	if m["ok"] != true || m["git"] != true {
+		t.Fatalf("discard response = %v", m)
+	}
+	for rel, want := range map[string]string{
+		"sub/mod.go":         "line one\n", // back to HEAD (nothing staged)
+		"del.go":             "del\n",      // deleted file restored
+		"add.go":             "added\n",    // back to the staged version, not removed
+		"untr.go":            "<missing>",  // untracked: deleted
+		"newdir/deeper/n.go": "<missing>",
+		"newdir/keep.log":    "ignored\n", // ignored files are never touched
+		"sub/ren2.go":        "old\n",     // not asked about
+	} {
+		if got := read(rel); got != want {
+			t.Errorf("%s = %q, want %q", rel, got, want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "newdir", "deeper")); !os.IsNotExist(err) {
+		t.Error("an emptied untracked folder was left behind")
+	}
+	rep := gitStatusOf(t, s)
+	if c, ok := changeIn(rep.Staged, "add.go"); !ok || c.Status != "A" {
+		t.Errorf("discard lost staged work: %+v", rep.Staged)
+	}
+	for _, p := range []string{"sub/mod.go", "del.go", "add.go", "untr.go"} {
+		if _, ok := changeIn(rep.Changes, p); ok {
+			t.Errorf("%s still has changes", p)
+		}
+	}
+	if !indexed(s, "del.go") || indexed(s, "untr.go") {
+		t.Error("the index did not follow the discard")
+	}
+
+	for _, body := range []string{`{"paths":[""]}`, `{"paths":["."]}`, `{"paths":[".git/HEAD"]}`, `{"paths":["../x"]}`, `{"all":true}`} {
+		if rec := postJSON(t, s, "/api/git/discard", body); rec.Code != http.StatusBadRequest {
+			t.Errorf("discard %s: got %d, want 400", body, rec.Code)
+		}
+	}
+}
+
+func TestGitShow(t *testing.T) {
+	s, root := scmServer(t)
+	show := func(q string) map[string]any {
+		t.Helper()
+		code, m := get(t, s, "/api/git/show?"+q)
+		if code != 200 {
+			t.Fatalf("show %s: %d %v", q, code, m)
+		}
+		return m
+	}
+	head := strings.TrimSpace(gitTestRun(t, root, "rev-parse", "HEAD"))
+	os.WriteFile(filepath.Join(root, "sub", "crlf.txt"), []byte("a\r\nb\r\n"), 0o644)
+	gitTestRun(t, root, "add", "sub/crlf.txt")
+	gitTestRun(t, root, "commit", "-qm", "second", "--", "sub/crlf.txt")
+	second := strings.TrimSpace(gitTestRun(t, root, "rev-parse", "HEAD"))
+
+	for _, c := range []struct {
+		q      string
+		exists bool
+		text   string
+	}{
+		{"path=sub/mod.go", true, "line one\n"},                  // HEAD by default
+		{"path=sub/mod.go&ref=HEAD", true, "line one\n"},         // the working tree has "line two"
+		{"path=del.go", true, "del\n"},                           // gone from disk, not from HEAD
+		{"path=add.go", false, ""},                               // added: nothing at HEAD
+		{"path=add.go&ref=INDEX", true, "added\n"},               // but staged
+		{"path=sub/mod.go&ref=BASE", true, "line one\n"},         // BASE is HEAD outside PR review
+		{"path=sub/crlf.txt&ref=" + second, true, "a\r\nb\r\n"},  // exact bytes
+		{"path=sub/crlf.txt&ref=" + second[:8] + "^", false, ""}, // its parent didn't have it
+		{"path=sub/mod.go&ref=" + head, true, "line one\n"},
+		{"path=nope.go", false, ""},
+	} {
+		m := show(c.q)
+		if m["exists"] != c.exists || m["text"] != c.text || m["binary"] != false || m["tooLarge"] != false {
+			t.Errorf("%s: %v", c.q, m)
+		}
+	}
+	if m := show("path=sub/crlf.txt&ref=" + second); m["ref"] != second || m["path"] != "sub/crlf.txt" || m["eol"] != "\r\n" {
+		t.Errorf("echoed fields: %v", m)
+	}
+	for _, q := range []string{"path=sub/mod.go&ref=--output=/tmp/x", "path=sub/mod.go&ref=main", "path=../x", "path=", "path=sub"} {
+		if code, _ := get(t, s, "/api/git/show?"+q); code != http.StatusBadRequest {
+			t.Errorf("%s: got %d, want 400", q, code)
+		}
+	}
+
+	// A binary blob is flagged, not shipped.
+	os.WriteFile(filepath.Join(root, "b.bin"), []byte("x\x00y"), 0o644)
+	gitTestRun(t, root, "add", "b.bin")
+	if m := show("path=b.bin&ref=INDEX"); m["exists"] != true || m["binary"] != true || m["text"] != "" {
+		t.Errorf("binary: %v", m)
+	}
+
+	// An unborn HEAD has nothing at HEAD, and says so.
+	fresh := t.TempDir()
+	gitTestRun(t, fresh, "init", "-q")
+	os.WriteFile(filepath.Join(fresh, "f.txt"), []byte("f\n"), 0o644)
+	if _, _, exists, _, err := gitBlob(fresh, "HEAD", "f.txt", maxTextBytes); err != nil || exists {
+		t.Fatalf("unborn HEAD: exists=%v err=%v", exists, err)
+	}
+	if data, size, _, _, _ := gitBlob(root, "HEAD", "sub/mod.go", 3); data != nil || size != 9 {
+		t.Fatalf("over max: data %q size %d", data, size)
+	}
+}
+
+func TestGitCommitAmend(t *testing.T) {
+	s, root := scmServer(t)
+	gitTestRun(t, root, "add", "-A")
+	if rec := postJSON(t, s, "/api/git/commit", `{"message":"first"}`); rec.Code != 200 {
+		t.Fatalf("commit: %d %s", rec.Code, rec.Body.String())
+	}
+	before := strings.TrimSpace(gitTestRun(t, root, "rev-parse", "HEAD~1"))
+
+	// Message only.
+	if rec := postJSON(t, s, "/api/git/commit", `{"message":"first, reworded","amend":true}`); rec.Code != 200 {
+		t.Fatalf("amend: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := strings.TrimSpace(gitTestRun(t, root, "log", "-1", "--format=%s")); got != "first, reworded" {
+		t.Fatalf("subject = %q", got)
+	}
+	// Staged content, keeping the message.
+	os.WriteFile(filepath.Join(root, "more.go"), []byte("more\n"), 0o644)
+	gitTestRun(t, root, "add", "more.go")
+	if rec := postJSON(t, s, "/api/git/commit", `{"amend":true}`); rec.Code != 200 {
+		t.Fatalf("amend --no-edit: %d %s", rec.Code, rec.Body.String())
+	}
+	if got := strings.TrimSpace(gitTestRun(t, root, "log", "-1", "--format=%s")); got != "first, reworded" {
+		t.Fatalf("subject after --no-edit = %q", got)
+	}
+	if parent := strings.TrimSpace(gitTestRun(t, root, "rev-parse", "HEAD~1")); parent != before {
+		t.Fatal("amend made a new commit instead of replacing the last one")
+	}
+	if !strings.Contains(gitTestRun(t, root, "show", "--stat", "HEAD"), "more.go") {
+		t.Fatal("amend left out the staged file")
+	}
+	if rec := postJSON(t, s, "/api/git/commit", `{"message":"  "}`); rec.Code != http.StatusBadRequest {
+		t.Fatalf("empty message without amend: %d", rec.Code)
+	}
+}
+
+func TestGitLogFields(t *testing.T) {
+	s, root := scmServer(t)
+	gitTestRun(t, root, "add", "-A")
+	gitTestRun(t, root, "commit", "-qm", "second")
+	code, m := get(t, s, "/api/git/log?limit=10")
+	if code != 200 {
+		t.Fatalf("log: %d", code)
+	}
+	commits, _ := m["commits"].([]any)
+	if len(commits) != 2 {
+		t.Fatalf("commits = %v", m["commits"])
+	}
+	c := commits[0].(map[string]any)
+	full := strings.TrimSpace(gitTestRun(t, root, "rev-parse", "HEAD"))
+	if c["sha"] != full || c["full"] != full || c["short"] != c["hash"] || !strings.HasPrefix(full, c["short"].(string)) ||
+		c["subject"] != "second" || c["author"] != "T" || c["email"] != "t@example.com" || c["date"] == "" {
+		t.Fatalf("commit = %v", c)
+	}
+	if ts, _ := c["time"].(float64); time.Since(time.Unix(int64(ts), 0)) > time.Hour {
+		t.Fatalf("time = %v", c["time"])
+	}
+	_, m = get(t, s, "/api/git/log?limit=1&skip=1")
+	if commits, _ = m["commits"].([]any); len(commits) != 1 || commits[0].(map[string]any)["subject"] != "init" {
+		t.Fatalf("skip: %v", m["commits"])
+	}
+}
+
+// TestUntrackedFilesReachTheTree covers files created and deleted outside
+// px0: git status sees them, the index follows, and listeners hear "tree".
+func TestUntrackedFilesReachTheTree(t *testing.T) {
+	s, root := scmServer(t)
+	ch, cancel := s.gitWatcher.Subscribe()
+	defer cancel()
+	waitTree := func(what string) {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case msg := <-ch:
+				if strings.HasPrefix(string(msg), "event: tree\n") {
+					return
+				}
+			case <-deadline:
+				t.Fatalf("no tree event after %s", what)
+			}
+		}
+	}
+	s.gitWatcher.Refresh() // the baseline
+
+	os.MkdirAll(filepath.Join(root, "made", "here"), 0o755)
+	os.WriteFile(filepath.Join(root, "made", "here", "x.go"), []byte("x\n"), 0o644)
+	s.gitWatcher.Refresh()
+	waitTree("creating a file")
+	if !indexed(s, "made/here/x.go") {
+		t.Fatal("the new file is not indexed")
+	}
+	if kids, ok := s.ix.Children("made/here"); !ok || len(kids) != 1 {
+		t.Fatalf("tree under made/here: %v %v", kids, ok)
+	}
+
+	os.RemoveAll(filepath.Join(root, "made"))
+	s.gitWatcher.Refresh()
+	waitTree("deleting a folder")
+	if indexed(s, "made/here/x.go") {
+		t.Fatal("the deleted file is still indexed")
+	}
+	for _, k := range func() []Node { kids, _ := s.ix.Children(""); return kids }() {
+		if k.Name == "made" {
+			t.Fatal("the deleted folder is still in the tree")
+		}
 	}
 }

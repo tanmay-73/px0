@@ -1,6 +1,7 @@
 package main
 
 import (
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -30,6 +31,7 @@ type Node struct {
 	Dirty      bool   `json:"dirty,omitempty"`      // For folders: true if any descendant has git changes
 	YourStatus string `json:"yourStatus,omitempty"` // PR review mode: reviewer's local changes since checkout
 	YourDirty  bool   `json:"yourDirty,omitempty"`  // PR review mode for folders: contains reviewer-changed descendant
+	Repo       bool   `json:"repo,omitempty"`       // For folders below the root: a git repository of its own (set by /api/tree)
 }
 
 // vcsDirs are version control internals. Unlike other ignored entries they are
@@ -162,6 +164,14 @@ func (ix *Index) Files() []FileEntry {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 	return ix.files
+}
+
+// HasFile reports whether rel is an indexed (not ignored) file.
+func (ix *Index) HasFile(rel string) bool {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	i := sort.Search(len(ix.files), func(i int) bool { return ix.files[i].Path >= rel })
+	return i < len(ix.files) && ix.files[i].Path == rel
 }
 
 // GitChanges returns the number of modified files and their workspace-relative paths.
@@ -754,6 +764,60 @@ func (ix *Index) UpdateGitStatus() (count int, files []string, changed bool, sta
 	return ix.gitChanges, resFiles, true, gs, newDirtyDirs, sg, ys, newYourDirtyDirs
 }
 
+// TouchTree is TouchPath for a whole subtree: a folder that appeared (moved
+// or restored) has everything under it indexed too, walked the way Build
+// walks, and one that went takes its descendants with it.
+func (ix *Index) TouchTree(rel string) {
+	ready := ix.Ready()
+	ix.TouchPath(rel) // builds the whole index when it is not ready yet
+	rel = strings.Trim(filepath.ToSlash(rel), "/")
+	if !ready || rel == "" || strings.Contains(rel, "..") {
+		return
+	}
+	abs := filepath.Join(ix.root, filepath.FromSlash(rel))
+	if info, err := os.Lstat(abs); err != nil || !info.IsDir() || ix.ignoredDir(rel) {
+		return
+	}
+	filepath.WalkDir(abs, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || p == abs {
+			return nil
+		}
+		// Follow nothing through symlinks, as Build doesn't.
+		if d.Type()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if d.IsDir() && vcsDirs[d.Name()] {
+			return filepath.SkipDir
+		}
+		r, err := filepath.Rel(ix.root, p)
+		if err != nil {
+			return nil
+		}
+		r = filepath.ToSlash(r)
+		ix.TouchPath(r)
+		if d.IsDir() && ix.ignoredDir(r) {
+			return filepath.SkipDir // listed dimmed, never walked
+		}
+		return nil
+	})
+}
+
+// ignoredDir reports whether the tree lists rel as an ignored directory.
+func (ix *Index) ignoredDir(rel string) bool {
+	parent := ""
+	if i := strings.LastIndexByte(rel, '/'); i >= 0 {
+		parent = rel[:i]
+	}
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	for _, k := range ix.children[parent] {
+		if k.Path == rel {
+			return k.Dir && k.Ignored
+		}
+	}
+	return false
+}
+
 // TouchPath incrementally inserts or updates a single relative file or directory
 // path in ix.children and ix.files without re-walking the workspace tree.
 func (ix *Index) TouchPath(rel string) {
@@ -774,6 +838,19 @@ func (ix *Index) TouchPath(rel string) {
 			idx := sort.Search(len(ix.files), func(i int) bool { return ix.files[i].Path >= rel })
 			if idx < len(ix.files) && ix.files[idx].Path == rel {
 				ix.files = append(ix.files[:idx], ix.files[idx+1:]...)
+			}
+			// A folder that went takes everything under it along. Files sort
+			// by path, so its descendants are the run from rel+"/" up to
+			// rel+"0" ('0' is the byte after '/').
+			lo := sort.Search(len(ix.files), func(i int) bool { return ix.files[i].Path >= rel+"/" })
+			hi := sort.Search(len(ix.files), func(i int) bool { return ix.files[i].Path >= rel+"0" })
+			if lo < hi {
+				ix.files = append(ix.files[:lo], ix.files[hi:]...)
+			}
+			for dir := range ix.children {
+				if strings.HasPrefix(dir, rel+"/") {
+					delete(ix.children, dir)
+				}
 			}
 			parentDir := ""
 			if lastSlash := strings.LastIndexByte(rel, '/'); lastSlash >= 0 {
@@ -915,4 +992,3 @@ func (ix *Index) TouchPath(rel string) {
 		}
 	}
 }
-

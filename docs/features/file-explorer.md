@@ -1,71 +1,53 @@
-# File Explorer & Workspace Management
+# File Explorer
 
-px0 includes a high-density file tree sidebar and multi-tab document manager. Designed for rapid spatial orientation across large directory trees, it features compact directory collapsing, Git status badging, automatic file revelation, and keyboard tab management.
+The Explorer view (`Ctrl/Cmd+Shift+E`) has three collapsible sections, as in VS Code:
 
----
-
-## Overview & Core Purpose
-
-Navigating deeply nested package structures (such as `src/main/java/com/company/project/controllers/...` or deeply nested monorepo packages) often clutters file sidebars with endless single-child folders, forcing developers to click repeatedly just to reach a single source file. Furthermore, cluttered sidebars make it difficult to distinguish between active project files and ignored artifacts (such as build outputs, test coverage dumps, or `node_modules`).
-
-px0's file explorer eliminates unnecessary clicks by automatically collapsing single-child directory chains into a single line (e.g., `src/core/auth/`). It honors your `.gitignore` configuration automatically—dimming ignored files and omitting them from searches while keeping the tree clean. Paired with a versatile tab bar, you can manage multiple documents and switch contexts effortlessly.
+- **Open Editors**: every open tab, across all editor groups, with a close button (a dot while unsaved) and its folder. Its header counts unsaved files.
+- **The workspace folder**: the file tree, titled with the workspace name.
+- **Outline**: the symbols of the active file (see [Symbol Outline](symbol-outline.md)).
 
 ---
 
-## Key Capabilities
+## The tree
 
-- **Compact Single-Child Folder Chains**: When a directory contains only a single subdirectory (common in Java, Go, and modular TypeScript architectures), px0 collapses the entire chain into a single combined entry (`internal/service/auth`). Clicking expands the entire chain in one click.
-- **Git Status Decorators**: Files with unstaged or staged modifications display color-coded status badges (`M`, `A`, `D`, `U`, `R`), with dirty status propagating up parent directory branches.
-- **Gitignore Awareness & Dimming**: Files and folders ignored by `.gitignore` rules (such as `dist/`, `build/`, `vendor/`, `node_modules`) are visually dimmed in the tree and excluded from background search indexes.
-- **Auto-Reveal Active File**: Opening a file via fuzzy search (`Cmd/Ctrl+P`) or Go to Definition (`F12`) automatically scrolls the sidebar tree to reveal and highlight the active file.
-- **Expand All / Collapse All**: The explorer header has buttons to open project folders or close every folder. Expand All shows a progress state while loading nested folders in small batches. Ignored folders stay closed to avoid bulk-loading generated trees; you can still open them individually. Collapse All can stop an expansion while it runs. The file tree starts with all folders collapsed on launch for a clean, distraction-free view.
-- **Collapsible Sidebar (`Cmd/Ctrl+B`)**: Quickly toggle the entire file explorer sidebar on or off to maximize reading space for wide diffs or code inspection.
-- **Multi-Tab Document Bar**:
-  - Open multiple files in tabs and switch between them.
-  - Switch tabs using keyboard shortcuts (`Ctrl+Tab`, `Alt+1` through `Alt+9`).
-  - Close active tabs with `Alt+W` (or `Cmd/Ctrl+W`).
-  - Right-click a tab for **Close**, **Close All**, **Close Others**, **Close to the Right**, or **Close to the Left**. Actions without matching tabs are disabled.
-  - Image tabs, Markdown previews, diff views, and external standard library files sit cleanly alongside source files.
+- **Fast on any size.** The tree is virtualized (only the rows in view exist in the page) and folders load on demand from the server's in-memory index, so folders with thousands of entries stay quick. Folders sort before files, names sort naturally (`file2` before `file10`).
+- **Git status.** Changed files are coloured and carry VS Code's letter badges (`M`, `A`, `D`, `U`, `R`, `!` for conflicts); a folder containing changes gets a dot, so changes are visible with the folder collapsed.
+- **Ignored files** (by `.gitignore`) are shown dimmed; they are left out of Quick Open and search.
+- **Nested repositories** (a clone or submodule inside the workspace) carry a `git` tag. Under the [workbench](workbench.md) their context menu has **Open Repository** and **Open Repository in New Tab**.
+- **Auto reveal.** The active file is revealed and selected in the tree when you switch to it (`explorer.autoReveal`, on by default).
+- **Remembered.** Expanded folders are kept per workspace in the browser, and restored on reload.
+- **Live.** The tree reloads when the server reports that it changed shape (px0's own file operations, discards, and, in a git repository, untracked files appearing or disappearing) and after px0's own file operations.
 
----
+## Mouse and keyboard
 
-## Developer Workflows & Practical Value
+| Action | Effect |
+| :--- | :--- |
+| Click a file | Open it in a preview tab |
+| Double-click, or `Ctrl/Cmd`-click a file | Open it in a kept tab |
+| `Alt`-click a file | Open it to the side |
+| Click a folder | Expand / collapse |
+| Drag onto a folder (or empty space) | Move the file or folder there, after a confirmation |
+| `↑` / `↓`, `Home` / `End`, `PageUp` / `PageDown` | Move the selection |
+| `→` / `←` | Expand a folder or step into it / collapse it or go to the parent |
+| `Enter` | Open the file or toggle the folder |
+| `Space` | Open the file in a preview tab, keeping focus in the tree |
+| `F2` | Rename inline |
+| `Delete` | Delete, after a confirmation |
 
-### Orientation in Unfamiliar Codebases
-When onboarding to a new repository, scrolling through the file explorer gives an immediate spatial understanding of project boundaries, package architecture, and documentation assets without opening thousands of nested folders.
+## Context menu
 
-### Maximizing Screen Real Estate
-On laptops or split-screen terminal workflows:
-1. Press **`Cmd/Ctrl+B`** to hide the file explorer.
-2. Use **`Cmd/Ctrl+P`** exclusively for keyboard-driven file jumping.
-3. Enjoy an unobstructed, edge-to-edge reading viewport.
+Right-click a row for: **New File...**, **New Folder...**, **Open to the Side**, **Open Preview** (Markdown), **Open Changes** (changed files), **Select for Compare** / **Compare with '...'**, **Copy Path**, **Copy Relative Path**, **Find in Folder...** (folders: opens Search limited to that folder), **Rename...** and **Delete**. Right-click empty space for New File, New Folder, **Refresh Explorer** and **Collapse Folders in Explorer**.
 
----
+The tree's title bar has **New File...**, **New Folder...**, **Refresh Explorer** and **Collapse Folders in Explorer**. File operations are described in [File Editing](file-editing.md).
 
-## Keyboard Shortcuts & Controls
+## Related
 
-| Shortcut | Context | Action |
-| :--- | :--- | :--- |
-| `Cmd/Ctrl+B` | Global | Toggle File Explorer Sidebar |
-| Expand All / Collapse All buttons | Explorer header | Open project folders or close every folder |
-| `Alt+W` | Tab Bar | Close Active Tab |
-| `Ctrl+Tab` | Tab Bar | Switch to Next Tab |
-| `Alt+1` … `Alt+9` | Tab Bar | Switch to Tab by Position |
-| Click Tab Close `✕` | Tab | Close Specific Tab |
-| Right-click Tab | Tab Bar | Open tab close menu |
+- `Ctrl/Cmd+B` hides and shows the whole side bar.
+- **File: Reveal Active File in Explorer View** (also on the tab's context menu and the breadcrumbs).
+- Tabs, preview tabs and split editors are described in [The Editor Workbench](editor.md#tabs-preview-tabs-and-split-editors).
 
----
+## Configuration
 
-## Configuration & Tuning
+- `explorer.autoReveal` (default `true`): reveal the active file in the tree.
 
-Explorer behavior can be customized in Settings (`Cmd/Ctrl+,`):
-
-- **Explorer: Compact Folders** (`explorer.compactFolders`): Automatically collapse single-child folder chains into single tree rows (defaults to `true`).
-- **Explorer: Auto Reveal** (`explorer.autoReveal`): Automatically scroll the tree and expand parent folders to highlight the active file (defaults to `true`).
-- **Files: Exclude** (`files.exclude`): Configure custom glob patterns to hide specific directories or generated files from the tree entirely.
-
----
-
-## Technical Architecture Deep Dive
-
-For details on the bounded-concurrency directory walker (`NumCPU * 4`), in-memory path index structures, and classification-based `.gitignore` engine, see [Filesystem Indexing & Ignore Engine Internals](../internals/indexing-and-ignore.md).
+For how the server walks and indexes the workspace and applies `.gitignore`, see [Filesystem Indexing & Ignore Engine](../internals/indexing-and-ignore.md).

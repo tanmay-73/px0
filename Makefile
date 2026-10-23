@@ -15,17 +15,13 @@ endif
 # Clean leading 'v' from version string if present
 CLEAN_VERSION := $(patsubst v%,%,$(TARGET_VERSION))
 
-POSTHOG_KEY ?= $(PX0_POSTHOG_KEY)
 LDFLAGS := -s -w
-ifneq ($(strip $(POSTHOG_KEY)),)
-  LDFLAGS += -X main.posthogKey=$(strip $(POSTHOG_KEY))
-endif
 
 all: build
 
 help:
 	@echo "px0 make targets:"
-	@echo "  make build             - build px0 binary for current platform (optional: POSTHOG_KEY=phc_...)"
+	@echo "  make build             - build px0 binary for current platform"
 	@echo "  make web               - bundle web assets (JS/CSS/themes)"
 	@echo "  make test              - run go test suite"
 	@echo "  make test-short        - run fast unit tests (short mode)"
@@ -39,7 +35,12 @@ help:
 	@echo "  make publish <version> - bump VERSION, commit, tag, and build dist binaries"
 	@echo "  make clean             - remove build artifacts"
 
-web:
+node_modules: package.json
+	@echo "Installing frontend dependencies (Monaco, codicons)..."
+	@if command -v bun >/dev/null 2>&1; then bun install; else npm install --no-audit --no-fund; fi
+	@touch node_modules
+
+web: node_modules
 	@echo "Bundling web assets..."
 	@node ./scripts/build-web.js
 
@@ -97,6 +98,5 @@ publish:
 	@echo "  git push origin master --tags"
 
 clean:
-	rm -f px0 web/app.js web/workbench.js
-	touch web/app.js web/workbench.js
+	rm -rf px0 web/dist
 	rm -rf dist/

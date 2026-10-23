@@ -6,7 +6,6 @@ It works the same on **GitHub**, **GitLab** (gitlab.com and self-hosted), **Gite
 
 **What you need**
 - `git` installed.
-- For conflict resolution, AI commit messages and batch-applying comments: a coding harness px0 supports (Claude Code, Gemini CLI, Cursor Agent, Codex, and others; see [Editing with Coding Agents](agent-editing.md)). Everything else works without one.
 
 ---
 
@@ -23,7 +22,7 @@ px0 https://bitbucket.org/workspace/repo/pull-requests/9
 
 px0 checks out the PR into a temporary directory and opens it in your browser. Run it from inside a clone of the repository if you have one: px0 then adds a worktree to that clone instead of cloning again, which is much faster for large repositories.
 
-You can also open a PR from a running px0 (`Cmd/Ctrl+K` → **Git: Open Pull Request…**) or from the [workbench](workbench.md).
+You can also paste the URL into the [workbench](workbench.md) (a bare `px0`), which opens each PR as a worktree of your local clone.
 
 > [!NOTE]
 > The checkout is temporary. It is removed when px0 exits, so push any commits you want to keep (step 4).
@@ -34,7 +33,7 @@ You can also open a PR from a running px0 (`Cmd/Ctrl+K` → **Git: Open Pull Req
 
 You can read any public PR without a token. To comment, review, push, or merge, px0 needs one.
 
-**The quick way:** click **No &lt;forge&gt; token — click to connect** in the PR bar. The Connect dialog links to the token page on your forge, lists what to pick there, and checks the token when you paste it. The token is saved and takes effect immediately, so there is nothing to restart.
+**The quick way:** in the **Pull Request** view, the Overview says **Read only** when there is no token; click **Connect...**. px0 opens the forge's token page in a new browser tab and asks for the token in a prompt that lists what to pick there. It checks the token against the PR before saving it, and the token takes effect immediately, so there is nothing to restart.
 
 The same steps, per forge:
 
@@ -53,7 +52,7 @@ Already use the GitHub CLI? If `gh auth login` has been run, px0 picks up its to
 3. Under **Select scopes**, check **`api`**.
 4. Create the token and paste it into px0.
 
-Self-hosted: the dialog remembers which instance the token belongs to (the `gitlab.host` setting), and px0 sends it only there. The GitLab CLI works too: after `glab auth login --hostname <your-gitlab>`, px0 finds the token glab stored for that host. Or set `GITLAB_TOKEN`, plus `GITLAB_HOST` for a self-hosted instance.
+Self-hosted: connecting from the review remembers which instance the token belongs to (the `gitlab.host` setting), and px0 sends it only there. The GitLab CLI works too: after `glab auth login --hostname <your-gitlab>`, px0 finds the token glab stored for that host. Or set `GITLAB_TOKEN`, plus `GITLAB_HOST` for a self-hosted instance.
 
 ### Gitea, Forgejo, Codeberg
 1. Open **Settings → Applications** on your instance: `https://<your-instance>/user/settings/applications` (on Codeberg: [codeberg.org/user/settings/applications](https://codeberg.org/user/settings/applications)).
@@ -61,7 +60,7 @@ Self-hosted: the dialog remembers which instance the token belongs to (the `gitl
 3. Under **Select permissions**, set **repository** and **issue** to **Read and write**.
 4. Generate the token and paste it into px0.
 
-The dialog remembers the instance (the `gitea.host` setting), and px0 sends the token only there. Or set `GITEA_TOKEN`, plus `GITEA_HOST` for an instance other than codeberg.org.
+Connecting from the review remembers the instance (the `gitea.host` setting), and px0 sends the token only there. Or set `GITEA_TOKEN`, plus `GITEA_HOST` for an instance other than codeberg.org.
 
 ### Bitbucket Cloud
 Bitbucket offers two kinds of token. Use an **API token** if you want to approve and merge:
@@ -83,43 +82,42 @@ Tokens are saved in your px0 settings file (`~/.px0/settings.json`, or `$XDG_CON
 
 ## 3. Review
 
-- **See the change in context.** The sidebar's **Changes** view lists the files the PR touches; `Cmd/Ctrl+D` toggles a file's diff against the PR's merge-base. Go to definition (`F12`), find references, and search all work across the whole repository, not just the diff.
-- **Comment on a line.** Select lines and press `Alt+R` (or hover a line number and pick **Add Review Comment**). Comments are drafts until you submit them, and they survive closing px0.
-- **Read and reply to the discussion.** The **Comments** panel at the bottom shows the PR's existing conversation and inline threads; reply in place.
-- **Submit.** Write an optional summary in the PR bar, then **Submit Review**, **Request Changes**, or **Approve**. Your drafts go with it. Approve and Request Changes appear when your token has push access.
+- **See the change in context.** The **Pull Request** view (in the activity bar) lists the files the PR changes under **Files Changed**; click one to open its diff against the PR's merge-base. Go to Definition (`F12`), Find References (`Shift+F12`), Quick Open and search all work across the whole repository, not just the diff.
+- **Comment on a line.** In a PR file, right-click a line (or a selection) and choose **Add Review Comment**. Comments are drafts until you submit them, show as icons in the editor margin, and survive closing px0.
+- **Read and reply to the discussion.** The **Comments** section shows the PR's conversation and inline threads; reply in place, or post a new comment.
+- **Submit.** In **Your Review**, write an optional summary, then **Submit Review**, **Request Changes**, or **Approve**. Your drafts go with it. Approve and Request Changes appear when your token has push access.
 
 ---
 
 ## 4. Fix things yourself (optional)
 
-The checkout is a real git worktree with the full git panel:
+The checkout is a real git worktree, and the Source Control view (`Ctrl/Cmd+Shift+G`) works in it:
 
-- Edit a file (`Cmd/Ctrl+E`), or ask your coding harness to (`Alt+E` on a selection).
-- **⚡ Batch Apply** turns all your draft comments into code changes in one go.
-- Stage, then **Commit with AI** or write your own message, then **Push**. The push goes to the PR's own branch, even when it comes from a fork.
+- Edit a file and save it (`Ctrl/Cmd+S`).
+- Stage, write a commit message, commit, then **Push**. The push goes to the PR's own branch, even when it comes from a fork.
 - If someone pushes to the PR while you review, **Pull** brings their commits in.
 
 ---
 
 ## 5. Bring the PR up to date with its base
 
-When the base branch has moved on, the status pill in the PR bar shows **Conflicts with main** or **Behind main**, and the merge button becomes **Resolve conflicts** or **Update branch**. Click it:
+When the base branch has moved on, the **Merge** section says the PR can't merge (conflicts, or behind its base).
 
-1. px0 fetches the base branch and asks, in the git panel: **Rebase with AI** or **Merge with AI**? Pick the harness and model there.
-2. The harness resolves any conflicts and finishes. It never pushes.
-3. Review what it did, then push. A merge is a normal **Push to PR**. A rebase rewrites the PR's commits, so it needs a **Force-push**, which px0 confirms first. The force-push is refused if anyone else pushed in the meantime, so their work is never lost.
+1. px0 fetches the base branch itself, with your forge token, into `refs/px0/base/<number>` in the checkout.
+2. In a terminal in the checkout, merge it (or rebase onto it), resolving any conflicts there. Source Control shows a banner while the operation is in progress, with **Abort** to undo it.
+3. Review the result, then **Push**. A merge is a normal push. A rebase rewrites the PR's commits and needs a force-push, which the editor's Push does not send; until the forge has the rewritten branch, **Merge** stays blocked.
 
-While the rebase runs, or sits unpushed, **Approve** and **Merge** wait. Otherwise they would act on the PR's old commits.
+While a rebase or merge is in progress, or local commits are unpushed, **Merge** waits. Otherwise it would act on the PR's old commits.
 
 ---
 
 ## 6. Merge
 
-When the pill says **Ready to merge**, use the split button next to Approve:
+Open the **Merge** section of the Pull Request view:
 
-1. Pick the method from the caret: **Create a merge commit**, **Squash and merge**, or **Rebase and merge**. Only the methods your repository allows are listed, and px0 remembers your choice.
-2. In the dialog, edit the commit title and message. **Rewrite with AI** drafts them from the PR's commits and diff, following your Commit Message Instructions (Settings → Git & Diff) and anything you type next to the button.
-3. **Confirm**. px0 merges exactly the commit you reviewed. If the PR changed since, the merge is refused and px0 asks you to pull first.
+1. Pick the method: **Create a merge commit**, **Squash and merge**, or **Rebase and merge**. Only the methods your repository allows are listed.
+2. Edit the commit title and message (for a merge commit or a squash).
+3. **Merge Pull Request**, and confirm. px0 merges exactly the commit you reviewed. If the PR changed since, the merge is refused and px0 asks you to pull first.
 
 ---
 
@@ -127,22 +125,20 @@ When the pill says **Ready to merge**, use the split button next to Approve:
 
 | What you see | Why | What to do |
 | :--- | :--- | :--- |
-| *&lt;Forge&gt; didn't accept this token* in the Connect dialog | The token is wrong, expired, or lacks access to this repository. | Create a new one with the scopes listed in [step 2](#2-connect-your-forge). |
+| *&lt;Forge&gt; didn't accept this token* when connecting | The token is wrong, expired, or lacks access to this repository. | Create a new one with the scopes listed in [step 2](#2-connect-your-forge). |
 | *404 Not Found* while opening a private PR | No token, or the token can't see the repository. | Connect a token first (Settings, or an environment variable), then run px0 again. |
 | No **Approve** / **Request Changes** / merge button | Your token lacks push access to the repository. On Bitbucket, an access token can't confirm push access. | Use a token from an account with write access. On Bitbucket, use an API token with your email. |
-| A self-hosted GitLab or Gitea token isn't used | The token is saved for a different host. | Set **GitLab Host** / **Gitea Host** in Settings to your instance, or reconnect from the PR's dialog. |
-| *Connected for this session (a token for another host is already saved)* | You already have a token saved for another instance of the same forge, and px0 kept it. | Nothing, if that's what you want. To switch permanently, change the token and host in Settings. |
-| *Merge blocked* | Branch protection: required approvals, checks, or resolved threads. | Hover the pill for the reason, and meet the requirement on the forge. |
-| The merge is refused although the pill said ready | On Gitea and Bitbucket, protection rules only show up when merging. | The error names the rule. |
-| *The PR has new commits since this checkout* | Someone pushed after you loaded the PR. | **Pull**, review the new commits, then merge. |
-| *someone else pushed … since this checkout* on force-push | The lease protected their commits; your rebase exists only in this checkout. | Reopen the PR (`px0 <url>`) to pick up their commits, then **Resolve conflicts** again. |
-| *diff base unresolved* badge, empty diff | px0 couldn't fetch the base branch. | Check that the token can read the repository, then **Pull** to retry. |
-| **Rebase with AI** / **Rewrite with AI** missing | No coding harness is installed. | Install one (see [Editing with Coding Agents](agent-editing.md)). |
+| A self-hosted GitLab or Gitea token isn't used | The token is saved for a different host. | Set **GitLab Host** / **Gitea Host** in Settings to your instance, or reconnect from the Pull Request view. |
+| A newly connected token isn't in Settings | A token for another instance of the same forge is already saved, so px0 used the new one for this session only and kept the saved one. | Nothing, if that's what you want. To switch permanently, change the token and host in Settings. |
+| The Merge section says the PR can't merge | Conflicts, branch protection (required approvals, checks, resolved threads), or a draft PR. | The section gives the forge's reason; meet the requirement on the forge. |
+| The merge is refused although the Merge section said it could merge | On Gitea and Bitbucket, protection rules only show up when merging. | The error names the rule. |
+| *The PR has new commits on the forge: pull them first.* | Someone pushed after you loaded the PR. | **Pull**, review the new commits, then merge. |
+| A diff base warning in the Overview, empty diffs | px0 couldn't fetch the base branch. | Check that the token can read the repository, then **Pull** to retry. |
 
 ---
 
 ## Where next
 
 - [Pull Request Review](github-pr-review.md): the full reference, including per-forge differences.
-- [Git Awareness & Diffs](git-integration.md): the git panel in depth.
+- [Git Integration](git-integration.md): the Source Control view in depth.
 - [Settings & Configuration](settings-and-configuration.md): every setting, including the forge tokens.

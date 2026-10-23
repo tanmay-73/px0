@@ -1,154 +1,104 @@
-# Git Awareness, Diff Viewer & Stage/Commit/Push/Pull
+# Git Integration: Source Control, Diffs & Compare
 
-px0 includes built-in Git awareness, an interactive visual diff viewer, and a sidebar panel for the rest of the everyday git loop. It highlights working-tree modifications across your file tree and editor gutters, lets you toggle between source code and an interactive side-by-side or unified diff against `HEAD` with `Cmd/Ctrl+D`, and stages, commits, pushes, and pulls without leaving the browser.
+px0 shows git status everywhere (explorer, tabs, editor gutter, status bar) and has a VS Code-style **Source Control** view for the everyday loop: review changes in Monaco's diff editor, stage, unstage, discard, commit, amend, pull, push and sync, and read the commit history.
 
----
-
-## Overview & Core Purpose
-
-In modern software engineering, coding agents, background formatters, and compilers continuously generate or modify files on disk. Developers spend a significant portion of their time verifying what changed, ensuring unintended edits were not introduced, and auditing modifications prior to staging or committing.
-
-px0's git status and diffing are read-only and zero-latency by default: querying `git status` asynchronously in the background never stages files, mutates index locks, or slows down viewer startup. With visual badges, ancestor dirty propagation, gutter indicators, and full split/unified diffs, you can review changes with complete confidence without leaving the browser.
-
-The sidebar's git panel is the one part of this feature that *does* write to the repository — but only in direct response to a click: staging, committing, pushing, and pulling all happen exactly when you ask for them, never automatically. Pull is deliberately conservative (fast-forward only) so it can never leave the working tree mid-conflict on its own; when branches have diverged, a rebase or merge happens only if you ask your coding harness to do it.
+Reading git state never writes anything. Every write (stage, commit, push, ...) is one explicit action you take; nothing runs on a timer or because a file changed. Pull is fast-forward only, so it can never leave the repository mid-conflict.
 
 ---
 
-## Key Capabilities
+## Live status
 
-- **Real-Time Live Status Synchronization**: px0 establishes a lightweight Server-Sent Events (SSE) connection (`/api/stream`, aliased by `/api/git/stream`) to push working-tree status changes directly to the browser. You do not need to refresh the browser or click manual reindex buttons when files change on disk.
-- **Sub-Millisecond CLI Change Awareness**: When you execute Git operations in your terminal (`git checkout`, `git reset`, `git add`, `git commit`, `git restore`, `git stash`), px0 detects the operation in sub-milliseconds by checking metadata timestamps on Git control files (`.git/index`, `.git/HEAD`, `.git/packed-refs`), instantly updating your view without scanning files on disk.
-- **File Tree Status Badges**: The file explorer decorates changed files with colored badges indicating their Git working-tree status:
-  - `M` (Modified): Working tree file differs from `HEAD`.
-  - `A` (Added / Staged): Newly added file staged in the index.
-  - `D` (Deleted): File removed from the working tree.
-  - `U` (Untracked): New file not yet tracked by Git.
-  - `R` (Renamed): File renamed or moved.
-- **Dirty Ancestor Folder Propagation**: When a nested file is modified (e.g., `src/core/auth/token.go`), all parent directories in the tree (`auth/`, `core/`, `src/`) display a subtle dirty indicator badge. This allows you to spot modifications even when folder branches are collapsed.
-- **File Explorer vs. Git Changes Toggle**: A dedicated segmented toggle in the sidebar header allows you to switch between the full project directory tree and the Git changes view. In Git changes mode, px0 collapses untouched folders and presents only files with uncommitted additions, modifications, or deletions.
-- **Automatic Explorer Fallback**: If all uncommitted changes are discarded or committed while you are in Git changes mode, px0 automatically switches back to standard file explorer mode so you are never left viewing an empty tree.
-- **Auto-Closing Discarded Diff Tabs**: When you discard changes to a file from the terminal (`git checkout -- file` or `git reset`), any tab opened in diff view for that file automatically closes in reverse index order, keeping the active tab index stable and preventing stale diff errors.
-- **Visual Gutter Diff Indicators**: The code viewer gutter places colored indicator bars alongside line numbers to mark edits in real time:
-  - Green bar for added lines.
-  - Blue bar for modified lines.
-  - Red triangle or marker for deleted lines.
-- **Interactive Diff Viewer (`Cmd/Ctrl+D`)**: Toggle between normal source view and full Git diff with a single keystroke.
-- **Side-by-Side & Unified Diff Modes**:
-  - **Side-by-Side (Split)**: View original `HEAD` code on the left and active working-tree code on the right with synchronized scrolling.
-  - **Unified**: View changes inline with consecutive additions and deletions.
-- **Intra-Line Character Diff Highlighting**: Powered by a token-level Myers diff algorithm with sub-character refinement. Exact modified characters and words are highlighted with distinct contrast within changed lines across both split and unified layouts, while insertion carets pinpoint where text was inserted relative to counterpart lines.
-- **Whitespace Diff Filtering**: Toggle whitespace trimming to hide trivial indentation and trailing space differences when reviewing significant logic changes.
-- **Direct Agent Editing from Diffs**: Select any modified or added line in the diff view and trigger an AI agent edit (`Alt+E`) to refine or correct the change on the spot.
-- **Battery and Focus Awareness**: The live stream automatically suspends when the browser tab is hidden (`document.visibilityState === 'hidden'`), conserving CPU cycles and laptop battery. When you switch back to px0, it instantly reconnects and queries `/api/git/refresh` to catch any changes made while the window was in the background.
-- **Per-File Stage Tick**: Every changed row in the file tree carries a small tick button next to its status badge. Clicking it stages or unstages that file (`git add` / `git reset`) without opening a terminal; the tick updates live as the same status stream that drives the badges reconciles it.
-- **Git Panel (Commit, Push, Pull)**: A resizable panel at the bottom of the sidebar shows the current branch, a live `staged / changed` count, a monospace commit message box, and Commit, Push, and Pull buttons. The **Commit** button enables whenever changes exist; if no files are explicitly staged, committing automatically stages all modified and untracked files. You can trigger a commit from the keyboard with **`Cmd/Ctrl+Enter`** inside the commit message box.
-- **Commit with AI**: A harness and model picker (the same one used for inline edits) sits above the commit box. **Commit with AI** dispatches the selected harness with the staged diff — plus any instructions from `git.commitMessageInstruction` in Settings — asks it to write only the commit message text, drops that into the box, and commits with it in the same action.
-- **Safe Repository & Unborn HEAD Support**: Seamlessly inspects repositories operating under safe directory configurations (`safe.directory`) and cleanly handles freshly initialized repositories before their first commit (unborn `HEAD`), without error dialogs during branch detection, unstaging, or diffing.
-- **Browse Recent Commits**: The git panel lists the latest commits. Click a commit to expand it in place: its author, when it was made, and every file it changed, each with an `A`/`M`/`D`/`R` status letter and `+`/`−` line counts. Click a file to read that commit's own diff, the same way the Unpushed list does: the tab is pinned to the commit and marked `@03beaf0`. A strip above the diff shows where the file sits in the commit (`3 / 17`); ‹ › step to the neighbouring file, swapping the tab in place rather than opening one per file. Click the short hash at the end of a row to copy it. Merge commits are shown against their first parent. In both lists, a large commit shows 100 files at a time, with a **Show 100 more** row below.
-- **Fast-Forward-Only Pull**: Pull always tries a clean fast-forward onto the remote (or, in a PR review session, the pull request's current head). If history has diverged, px0 itself never starts a merge. Instead the git panel shows what diverged and offers **Rebase with AI** or **Merge with AI**, which hand the job, conflicts included, to your selected coding harness. Nothing runs unless you click one, and the harness is told never to push.
-- **Git Errors Stay in the Git Panel**: Every git failure (stage, commit, push, pull, abort) shows in a card at the top of the git panel, next to the buttons that caused it, never as a global toast. The card stays until you dismiss it or the next git action succeeds.
-- **Push to the Right Place**: In a plain workspace, Push pushes the current branch to its configured upstream (offering to set one up on a first push). In a PR review session, Push targets the pull request's actual head branch on its actual repository — a fork included — never wherever the checkout happens to be sitting.
-- **Unpushed Commits**: Under the file tree, the Git changes view lists the commits on your branch that the tracking branch doesn't have yet (`@{u}..HEAD`), labelled with the ref they're ahead of (e.g. `origin/master`) so it's clear what "unpushed" means here. Click a commit to see the files it touched, badged the same way as working-tree changes; click a file to read that commit's own diff in the normal diff viewer. Committing no longer hides your work: the toggle stays available on a clean working tree, precisely because the commits are then the only thing left to review. If the branch has no upstream configured, the section simply doesn't appear — px0 never guesses a branch to measure against.
-- **Commit Hover Card**: Hovering a commit in that list shows its author, the full commit message, and its diffstat (insertions in green, deletions in red), with a **Copy SHA** button and — on a GitHub remote — a link on the author's name.
+- The server pushes status over one event stream (`/api/stream`). A `git checkout`, `git add` or `git commit` in a terminal shows up within about a second, because px0 watches git's own control files (`.git/index`, `.git/HEAD`, `.git/packed-refs`). Edits made by other tools are caught by an adaptive poll (every 2 s on small repositories, up to 15 s on huge ones).
+- The stream pauses while the browser tab is hidden and resumes, with a fresh status read, when you come back.
+- **Explorer:** changed files are coloured and carry VS Code's letter badges (`M` modified, `A` added, `D` deleted, `U` untracked, `R` renamed, `!` conflict); folders containing changes get a dot.
+- **Tabs** are coloured the same way. **Status bar:** the branch (with `*` when there are changes, and `REBASE`, `MERGE`, ... while one is in progress) and the sync counts.
+- **Gutter (quick diff):** every editor shows bars for lines added (green), changed (blue) and removed (red marker) compared with the file in the **index**, updated as you type. Click a bar to open the file's changes. It is off for untracked files and files over 20,000 lines.
 
----
+## The Source Control view (`Ctrl/Cmd+Shift+G`)
 
-## Developer Workflows & Practical Value
+From top to bottom:
 
-### Continuous Auditing of AI Agent Edits
-When an AI coding agent (Claude Code, Gemini CLI, Cursor Agent, Antigravity, Aider) edits your code in the background:
-1. Switch to the **Git Changes** view in the sidebar to isolate touched files.
-2. Status badges and gutter markers update in real time as the agent writes to disk.
-3. Open any modified file and press **`Cmd/Ctrl+D`** to review side-by-side changes against `HEAD`.
-4. If an edit needs refinement, select the relevant lines directly inside the diff view and press `Alt+E` to prompt the agent with a targeted correction.
+1. **Commit message box.** The placeholder names the branch. `Ctrl/Cmd+Enter` commits. The draft message is kept per workspace until you commit.
+2. **Commit button**, with a menu: **Commit**, **Commit (Amend)**, **Commit & Push**, **Commit & Sync**. When there is nothing to commit the button becomes **Sync Changes** (`n↓ m↑`) if the branch is behind or ahead, or **Publish Branch** if it has no upstream.
+3. **Merge Changes** (unmerged files, only during a merge or rebase), **Staged Changes** (index vs `HEAD`) and **Changes** (working tree vs index, untracked files as `U`). A file staged and then edited again is in both. Each group collapses, shows a count, and has group actions (Stage All, Unstage All, Discard All).
+4. **Commits:** the history from `HEAD`, newest first, with author and time; commits not yet pushed have a cloud icon. Click a commit to list the files it changed with `+`/`−` line counts, and click a file to open that commit's diff of it. Right-click for Copy Commit ID / Copy Commit Message. **Load More Commits...** pages back (up to 200).
 
-### Terminal Interaction Without Stale Views
-When managing branches or staging files from your terminal:
-1. Stage or reset files in the terminal (`git add file.go` or `git checkout -- file.go`).
-2. px0 immediately catches the `.git/index` modification and patches the file tree badges in place without resetting your scroll position or collapsing expanded folders.
-3. Tabs displaying diffs for discarded files close automatically, keeping your workspace clean and focused.
+Each file row has inline buttons: **Open File**, **Discard Changes** (Delete File for an untracked file) and **Stage Changes** in Changes, **Unstage Changes** in Staged Changes, **Stage Changes (mark resolved)** in Merge Changes. Right-click for the same actions plus Open Changes, Copy Relative Path and Reveal in Explorer View. Click a row to open its diff in a preview tab, double-click to keep it.
 
-### Pre-Commit Visual Review Station
-Before committing code from your terminal, open px0 to perform a visual walk-through of all pending changes. The Git changes view isolates your work, ensuring you do not commit debug logs, temporary comments, or unintended formatting tweaks.
+The view's title bar has **Commit**, **Refresh** and **More Actions...**: Pull, Push, Sync, Commit variants, Stage All / Unstage All / Discard All Changes, and **Abort Rebase/Merge/...** when one was left in progress. A banner says when a merge or rebase is in progress and offers **Abort**.
 
-### Stage, Write, and Commit Without Leaving the Browser
-Once you've reviewed a change in the diff view, finish the commit right there:
-1. Tick the files you want in this commit from the file tree (or click **Stage All**).
-2. Write a message in the git panel's commit box, or click **Commit with AI** to have your configured coding harness write one from the staged diff and commit with it directly.
-3. Click **Push** to send the branch to its remote. If it's the first push on a new branch, px0 offers to set the upstream for you.
+### Committing
 
-### Reviewing Local Commits Before You Push
-When you've made several commits locally and want to read them over before sending them up:
-1. Switch to the **Git Changes** view. The **Unpushed** section under the tree lists every commit ahead of your tracking branch, newest first.
-2. Hover a commit to see who wrote it, its full message, and how much it changed.
-3. Click it to expand the files it touched, then click a file to read that commit's diff — just that commit's, unaffected by anything you've edited since.
-4. Fix anything that needs fixing, commit again (the list updates itself), and click **Push**. The section empties as the commits land.
+- With nothing staged, Commit offers to **stage all your changes and commit them directly** (**Always** remembers the answer, like VS Code's smart commit).
+- **Commit (Amend)** rewrites the last commit with what is staged; an empty message keeps the old one. It never stages anything itself.
+- **Commit & Push** and **Commit & Sync** run the push or sync right after a successful commit.
 
-### Catching Up With a Moving Remote
-When a teammate (or CI) has pushed new commits to the branch you're reviewing:
-1. Click **Pull** in the git panel.
-2. If your local branch can fast-forward cleanly onto the new commits, px0 updates it and the diff view refreshes automatically.
-3. If your branch has diverged (you have local commits the remote doesn't), the git panel shows a **Can't fast-forward** card with the local and incoming commit counts and a harness picker. Pick one:
-   - **Rebase with AI** replays your commits on top of the remote for a straight history.
-   - **Merge with AI** joins the two histories with a merge commit.
-   - Or dismiss the card and resolve it in a terminal.
-4. While the harness runs, the card shows its progress and live output; **Cancel** stops it. Pull and Push are disabled until it finishes.
-5. px0 then checks where the branch actually ended up:
-   - **Rebased/Merged**: the branch is up to date, with a **Push** button to publish once you've reviewed the result.
-   - **Not finished**: the harness stopped mid-rebase or mid-merge, usually on a conflict. **Finish with AI** asks it to resolve and continue; **Abort** restores the branch exactly as it was.
-   - **Didn't complete**: the branch is unchanged (the harness aborted or was cancelled); its output says why.
+### Discarding
 
-A rebase or merge left half-done from a terminal is shown the same way when px0 loads or Pull is clicked.
+Discard throws away working-tree changes only: tracked files go back to their staged version, untracked files are deleted (ignored files and nested repositories are never touched). Staged changes are kept. px0 asks first, and says when files will be deleted.
 
----
+### Pull, push and sync
 
-## Keyboard Shortcuts & Controls
+- **Pull** fast-forwards onto the upstream. If the branches have diverged, px0 refuses and leaves the rebase or merge to you in a terminal; nothing is merged for you.
+- **Push** pushes the branch to its upstream, setting one up on `origin` on the first push of a new branch.
+- **Sync** pulls if the branch is behind, then pushes if it is ahead (or has no upstream).
+- A running operation is shown in the status bar; failures appear as notifications with git's message.
 
-| Shortcut / Control | Context | Action |
+In a pull request review, Pull and Push target the PR's own head branch. See [Pull Request Review](github-pr-review.md).
+
+## Diffs
+
+Changes open in Monaco's diff editor, side by side (or inline, with **Toggle Inline View** in the editor title bar or the palette). What each side shows depends on where you opened it, following VS Code:
+
+| Opened from | Left (original) | Right (modified) |
 | :--- | :--- | :--- |
-| `Cmd/Ctrl+D` | Editor | Toggle Git Diff View (Split / Unified vs. `HEAD`) |
-| Toggle Segment (`Files` / `Changes`) | Sidebar Header | Switch between File Explorer and Changed Files Only |
-| Toggle Icon | Diff Header | Switch between Side-by-Side and Unified Diff |
-| Space Icon | Diff Header | Toggle Ignore Leading/Trailing Whitespace |
-| `Mod+Shift+R` | Global | Force Workspace and Git Status Refresh |
-| Stage Tick | File Tree Row | Stage / unstage that file |
-| Commit Row | Unpushed Section | Expand / collapse the files that commit touched |
-| File Row | Unpushed Section | Open that file's diff for that commit |
-| Hover a Commit | Unpushed Section | Show author, full message and diffstat, with Copy SHA |
-| **Stage All** | Git Panel | Stage every changed file |
-| **Commit** / `Cmd/Ctrl+Enter` | Git Panel / Commit Box | Commit staged changes (auto-stages all modifications if none staged) |
-| **Commit with AI** | Git Panel | Write a commit message from the staged diff with the selected harness, then commit with it |
-| **Pull** | Git Panel | Fast-forward onto the remote (or, in PR review, the PR's current head); on divergence, offers Rebase/Merge with AI |
-| **Push** | Git Panel | Push the current branch (or, in PR review, to the PR's head branch) |
-| Click a commit | Recent Commits | Expand / collapse its changed files |
-| Click a changed file | Recent Commits | Open that file's diff within the commit, in a tab pinned to it |
-| **Show 100 more** | Recent Commits, Unpushed | List the next 100 files of a large commit |
-| Double-click a commit / `Enter` | Recent Commits | Open the commit's first changed file |
-| Hash chip | Recent Commits | Copy the short SHA |
-| `↑` / `↓`, `→` / `←` | Recent Commits | Move between commits and files; expand / collapse |
-| ‹ › | Pinned tab's diff strip | Previous / next file in the commit |
-| `[c` / `]c` | Diff View | Jump to previous / next diff hunk |
-| `[f` / `]f` | Diff View / Editor | Step to previous / next changed file |
-| **✓ Viewed** | Diff Review Strip | Mark file as reviewed and auto-advance to next unviewed changed file |
-| **↕ Expand** | Diff Hunk Header (`@@ ... @@`) | Expand 15 lines of surrounding file context inline without leaving diff view |
-| **Stage / Unstage / Discard** | Diff Hunk Header (`@@ ... @@`) | Stage, unstage, or discard a single diff hunk via `git apply --unidiff-zero` |
+| **Changes** | the file in the index | the working-tree file, **editable** |
+| **Staged Changes** | the file at `HEAD` | the file in the index (read-only) |
+| A commit in **Commits** | the file in the commit's first parent | the file in that commit (read-only) |
+| A file in a PR review | the PR's merge-base (`BASE`) | the working-tree file, editable |
+
+- Because the right side of a working-tree diff is the file itself, you can fix things while reviewing; saving writes the file. The arrows in the diff's margin revert a block in that editable side.
+- **Next / Previous Change** (`Alt+F5` / `Shift+Alt+F5`, or the arrows in the title bar) step through changes. **Open File** (title bar) opens the file itself.
+- Settings: `diffEditor.renderSideBySide`, `diffEditor.ignoreTrimWhitespace` (Toggle Ignore Trim Whitespace), `diffEditor.hideUnchangedRegions.enabled`.
+- **Open Changes** (`git.openChange`: the editor title button on a changed file, the explorer's context menu, or a gutter bar) opens the working-tree change, or the staged one if that is all there is.
+- The read-only sides of a diff are read when the tab opens. After a stage or commit, close and reopen the diff to compare against the new index or `HEAD` (the gutter bars do follow the index on their own).
+
+## Comparing any two files
+
+Like VS Code: **Select for Compare** on one file and **Compare with Selected** on another (explorer or tab context menu), or run **File: Compare Active File With...** and pick the other file. The comparison is a diff editor with both files editable; the left one is the first file. The files need not be tracked.
 
 ---
 
-## Configuration & Preferences
+## Commands
 
-Git behavior can be customized in Settings (`Cmd/Ctrl+,`):
+All of these are in the Command Palette (`Ctrl/Cmd+Shift+P`) under **Git:**: Commit, Stage All Changes, Unstage All Changes, Stage Changes, Unstage Changes, Discard Changes, Open Changes, Open File, Push, Pull, Sync, Refresh. Diff commands are under **Diff Editor:**.
 
-- **Git: Gutter Indicators** (`git.gutterIndicators`): Enable or disable real-time change indicator bars in the editor gutter (defaults to `true`).
-- **Diff Editor: Render Side-by-Side** (`diffEditor.renderSideBySide`): Default layout for the diff view (`true` for split, `false` for unified).
-- **Diff Editor: Ignore Trim Whitespace** (`diffEditor.ignoreTrimWhitespace`): Ignore leading and trailing whitespace diffs (defaults to `true`).
-- **Commit Message Instructions** (`git.commitMessageInstruction`): Free-text instructions appended to the prompt **Commit with AI** sends to your coding harness (e.g. *"Follow Conventional Commits"* or *"Reference the ticket number in the branch name"*). Defaults to empty. This setting renders as a multi-line textarea in the Settings UI.
-- **Coding Harness & Model**: **Commit with AI** uses the same globally selected harness and model as inline agent edits (`agent.harness`, and its persisted model) — see [Editing with Coding Agents](agent-editing.md).
-- **CLI Flag `-no-git`**: Launch px0 with Git features completely disabled (`px0 -no-git`) for environments where Git is not installed or when viewing plain directory archives.
-- **CLI Flag `-no-agent`**: Disables **Commit with AI** along with every other coding-harness feature; Stage/Commit/Push/Pull remain available since they never invoke a harness.
+| Key | Action |
+| :--- | :--- |
+| `Ctrl/Cmd+Shift+G` | Show Source Control (focuses the commit box) |
+| `Ctrl/Cmd+Enter` | Commit, in the commit box |
+| `Alt+F5` / `Shift+Alt+F5` | Next / previous change in a diff |
 
----
+## Configuration
 
-## Technical Architecture Deep Dive
+- `diffEditor.renderSideBySide`, `diffEditor.ignoreTrimWhitespace`, `diffEditor.hideUnchangedRegions.enabled` (Settings, `Ctrl/Cmd+,`).
+- `px0 -no-git` disables git features entirely.
 
-For an explanation of how px0 executes read-only `git status --porcelain=v2` and `git diff` commands concurrently with directory indexing, how `.git/index` stat cache fast-paths achieve sub-millisecond CLI detection, and how Server-Sent Events stream diffs to the DOM, see [Git Awareness & Diffing Internals](../internals/git-integration.md).
+## Endpoints
+
+Every POST requires a same-origin request over `localhost` or a direct IP address.
+
+| Endpoint | Purpose |
+| :--- | :--- |
+| `GET /api/git/status` | Branch, `head`, upstream, ahead / behind, any merge / rebase / cherry-pick / revert in progress, and the `staged`, `changes` and `conflicts` lists. In a PR review session the upstream is the PR's head branch. |
+| `POST /api/git/stage` / `unstage` | `{path}`, `{paths: [...]}` or `{all: true}`. Paths are literal, never globs. |
+| `POST /api/git/discard` | `{paths: [...]}`: throw away working-tree changes; untracked files are deleted. |
+| `GET /api/git/show?path=P&ref=R` | A file at `HEAD` (default), `INDEX`, `BASE` (the PR merge-base in a review, else `HEAD`), a commit SHA, or `SHA^`; `exists: false` when the file is missing there. This is what the diff editor's read-only sides and the gutter use. |
+| `POST /api/git/commit` | `{message}`, or `{message, amend: true}`. |
+| `POST /api/git/push` / `pull` | Push; fast-forward-only pull (`409` on divergence). |
+| `POST /api/git/abort` | Abort the operation in progress. |
+| `GET /api/git/log` | Recent commits (`limit` up to 200). |
+| `GET /api/unpushed` | Commits in `@{u}..HEAD`, used to mark unpushed commits. |
+| `GET /api/commitfiles?sha=` | The files a commit changed, with line counts. |
+
+See [Git Integration Internals](../internals/git-integration.md) for how status, the watcher and the endpoints work.

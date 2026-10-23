@@ -9,3 +9,5 @@ px0
 .idea/
 build/
 *.log
+node_modules/
+web/dist/

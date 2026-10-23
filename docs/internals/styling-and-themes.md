@@ -1,42 +1,51 @@
 # Styling & Theme Architecture
 
-This document describes px0's styling architecture, CSS custom property design system, dynamic theme loading pipeline, and token specifications.
-
-px0 reads every colour in the user interface through a CSS custom property, known as a token. A theme is defined in a single CSS file that assigns values to these tokens.
+px0 reads every colour through a CSS custom property, a *token*. A theme is one CSS file that assigns the tokens. The workbench chrome reads them straight from CSS; Monaco cannot read CSS variables, so [`web/src/theme.js`](../../web/src/theme.js) turns the computed values into a Monaco theme whenever the theme changes.
 
 ## 1. How Themes Load
 
-- `web/style.css`: Holds layout, grid geometry, and component styling. It contains no literal colors. Its `:root` block defines structural typography tokens (fonts, sizes) and provides fallbacks for optional colour tokens.
-- `web/themes/<id>.css`: Each theme resides in its own file under [`web/themes/`](../../web/themes/), containing a single rule for `:root[data-theme="<id>"]`. The filename without extension acts as the theme ID.
-- Dynamic Concatenation (`/static/themes.css`): The Go server concatenates every file matching `web/themes/*.css` in alphanumeric order once (`sync.Once`) and serves the cached stylesheet at `/static/themes.css`. [`web/index.html`](../../web/index.html) links this file immediately after `style.css`.
-- Client-Side Discovery: At application boot, [`web/src/theme.js`](../../web/src/theme.js) scans the loaded document stylesheets for rules matching `:root[data-theme="<id>"]`. It extracts the human-readable display name from `--theme-name` and the color scheme hint from `color-scheme`.
-- State Persistence: The active theme is applied via the `data-theme` attribute on the `<html>` root element and persisted in `localStorage` under `px0.theme`. If a saved theme is removed, px0 falls back to the default `catppuccin-mocha`.
+- **Stylesheets.** [`web/src/css/app.css`](../../web/src/css/app.css) lays out and styles the workbench (title bar, activity bar, side bars, connected tabs, panel, status bar, views, menus, quick input, notifications, dialogs) after VS Code 1.142's modern UI, with sizes taken from VS Code's own stylesheets and measured from the running workbench; [`web/src/css/markdown.css`](../../web/src/css/markdown.css) styles the Markdown preview; [`web/src/css/workbench.css`](../../web/src/css/workbench.css) the workbench page. They are imported by the entry modules and bundled into `web/dist/app.css` and `workbench.css`. They contain no theme colours: `app.css`'s `:root` block holds structural tokens (fonts `--ui` / `--mono`, radii, bar heights) and defaults for the optional colour tokens (`--kt: var(--k)`, `--gi: var(--s)`, `--git-modified: var(--mark-active)`, ...).
+- **Theme files.** Each theme is [`web/themes/<id>.css`](../../web/themes/), a single rule for `:root[data-theme="<id>"]`. The file name is the theme ID.
+- **`/static/themes.css`.** The server joins every `web/themes/*.css` in file-name order once (`sync.Once`) and serves the result. [`web/index.html`](../../web/index.html) and `web/workbench.html` link it before the bundled CSS.
+- **Discovery.** `listThemes()` in `theme.js` walks the loaded stylesheets for `[data-theme="<id>"]` rules and reads the display name from `--theme-name` and the scheme from `color-scheme`. There is no list of themes in code.
+- **Applying.** `setTheme(id)` sets `data-theme` on `<html>`, emits `theme:changed`, and (when persisting) stores the ID in `localStorage` (`px0.theme`) and posts `workbench.colorTheme` to `/api/settings`, which the workbench page and every workspace read. `initialTheme` prefers a non-default `workbench.colorTheme` from settings, then the browser's saved choice, then `vscode-dark-2026`. An unknown ID falls back to the default.
 
 > [!NOTE]
-> Theme rules intentionally use `:root[data-theme="<id>"]` rather than a bare attribute selector `[data-theme="<id>"]`. The `:root` pseudo-class raises CSS specificity above the fallback rules in `style.css`, ensuring theme tokens always win regardless of stylesheet evaluation order.
+> Theme rules use `:root[data-theme="<id>"]` rather than a bare `[data-theme="<id>"]`. The `:root` pseudo-class raises specificity above the fallback rules in `app.css`, so theme tokens win regardless of stylesheet order.
 
-The explorer header controls use the same tokenized `.mini` button style as Re-index. The Expand All progress state uses accent tokens; its pulse runs only when the browser allows motion, and keyboard focus uses a visible tokenized outline.
+## 2. Monaco Themes
 
-## 2. Built-in Themes
+`monacoTheme()` in `theme.js` reads the computed tokens (`themeTokens()`), converts each to `#rrggbb` (non-hex values go through a canvas context; `alpha()` adds transparency) and builds a Monaco theme on `vs-dark` or `vs` according to `color-scheme`:
 
-| Name             | ID                 | Scheme | Inspiration / Palette                  |
-| ---------------- | ------------------ | ------ | -------------------------------------- |
-| Catppuccin Latte | `catppuccin-latte` | light  | Catppuccin palette (contrast-tuned)    |
-| Catppuccin Mocha | `catppuccin-mocha` | dark   | Catppuccin palette (default px0 theme) |
-| Dracula          | `dracula`          | dark   | Classic Dracula palette                |
-| GitHub Dark      | `github-dark`      | dark   | GitHub dark default                    |
-| Gruvbox Dark     | `gruvbox-dark`     | dark   | Gruvbox dark retro groove              |
-| Gruvbox Light    | `gruvbox-light`    | light  | Gruvbox light                          |
-| Monokai          | `monokai`          | dark   | Classic Monokai high-contrast          |
-| Nord             | `nord`             | dark   | Arctic Nord palette                    |
-| One Dark         | `one-dark`         | dark   | Atom One Dark                          |
-| Paper            | `light`            | light  | Minimalist GitHub light                |
-| Rose Pine        | `rose-pine`        | dark   | Rose Pine Soho vibes                   |
-| Solarized Dark   | `solarized-dark`   | dark   | Canonical Ethan Schoonover Solarized   |
-| Solarized Light  | `solarized-light`  | light  | Canonical Solarized light              |
-| Tokyo Night      | `dark`             | dark   | Tokyo Night deep blue                  |
+- **Token rules** map Monarch scopes onto px0's syntax tokens: `keyword` → `--k`, `string` → `--s`, `comment` → `--c` (italic), `number` → `--m`, `type` → `--kt`, `type.identifier` / `class` / `namespace` → `--nc`, `function` → `--nf`, `predefined` → `--nb`, `identifier` / `variable` → `--nv`, `constant` → `--no`, `delimiter` → `--p`, `operator` → `--o`, `tag` → `--nt`, `attribute.name` → `--na`, `annotation` → `--nd`, `metatag` → `--cp`, `string.key` / `key` → `--np`, `invalid` → `--err`.
+- **Workbench colours** map the surfaces. A theme may set VS Code's editor colours directly (`--editor-bg`, `--editor-fg`, `--line-number-active`, `--gutter-added` / `-modified` / `-deleted`, `--diff-ins-text` / `--diff-del-text` / `--diff-ins-line` / `--diff-del-line`, `--find-match`, `--find-match-hl`, `--word-hl`, `--sel-hl`, `--sel-inactive`, `--bracket-match`, `--indent-guide`, `--indent-guide-active`, `--whitespace`, `--suggest-selected`, `--scrollbar*`); otherwise they are derived: editor background `--bg`, line highlight `--cur`, selection `--sel`, find matches `--mark` / `--mark-active`, cursor `--accent`, line numbers `--faint` / `--fg`, widgets, hovers, peek views, menus and quick input `--bg2` / `--bg3` / `--bg4`, quick-diff gutter `--gi` / `--accent-fg` / `--gd`, diff inserted / removed text `--gi` / `--gd` at 22% and lines `--gi-bg` / `--gd-bg`, markers `--err` / `--mark-active` / `--accent-fg`.
 
-## 3. Creating a Custom Theme
+`applyMonacoTheme()` in `monaco.js` defines the theme as `px0` and applies it at boot and on every `theme:changed`, so the theme picker's live preview recolours open editors too.
+
+## 3. Built-in Themes
+
+| Name             | ID                 | Scheme |
+| ---------------- | ------------------ | ------ |
+| Catppuccin Latte | `catppuccin-latte` | light  |
+| Catppuccin Mocha | `catppuccin-mocha` | dark |
+| Dark 2026 | `vscode-dark-2026` | dark (default) |
+| Light 2026 | `vscode-light-2026` | light |
+| Dark Modern | `vscode-dark` | dark |
+| Light Modern | `vscode-light` | light |
+| Dracula          | `dracula`          | dark   |
+| GitHub Dark      | `github-dark`      | dark   |
+| Gruvbox Dark     | `gruvbox-dark`     | dark   |
+| Gruvbox Light    | `gruvbox-light`    | light  |
+| Monokai          | `monokai`          | dark   |
+| Nord             | `nord`             | dark   |
+| One Dark         | `one-dark`         | dark   |
+| Paper            | `light`            | light  |
+| Rose Pine        | `rose-pine`        | dark   |
+| Solarized Dark   | `solarized-dark`   | dark   |
+| Solarized Light  | `solarized-light`  | light  |
+| Tokyo Night      | `dark`             | dark   |
+
+## 4. Creating a Custom Theme
 
 1. Copy an existing theme file:
   ```bash
@@ -51,18 +60,18 @@ The explorer header controls use the same tokenized `.mini` button style as Re-i
   --theme-name: "Midnight";
   color-scheme: dark;
   ```
-1. Define the required color tokens (see Token Reference below).
-1. Preview by running px0 with `go run .` (rebuild after each CSS change; themes are embedded):
+1. Define the required colour tokens (see the reference below).
+1. Rebuild and run (themes are embedded in the binary):
   ```bash
-  go run . .
+  make build && ./px0 .
   ```
-1. Run unit tests to verify theme conformance:
+1. Run the tests:
   ```bash
   go test ./...
   ```
-  `TestThemesStylesheetJoinsEveryThemeFile` in [`px0_test.go`](../../px0_test.go) ensures all required tokens are present and selector IDs match filenames.
+  `TestThemesStylesheetJoinsEveryThemeFile` in [`px0_test.go`](../../px0_test.go) checks that every theme file is joined, its selector ID matches its file name, and it defines every required token.
 
-### Minimal Working Theme Example
+### Minimal Working Theme
 
 ```css
 :root[data-theme="midnight"] {
@@ -79,81 +88,99 @@ The explorer header controls use the same tokenized `.mini` button style as Re-i
 }
 ```
 
-## 4. Complete Token Reference
-### Surface Elevation Tokens
+## 5. Token Reference
 
-Four progressive elevation steps radiating from the editor viewport outward:
+### Surfaces
 
-| Token  | Required | Controls                                                                                                                |
-| ------ | -------- | ----------------------------------------------------------------------------------------------------------------------- |
-| `--bg` | Yes      | Editor background, line gutter, active tab, text inputs, hovercard signature block, Markdown preview background.        |
-| `--bg2`| Yes      | File explorer sidebar, tab bar, right inspector, status bar, hovercard action row, Markdown code blocks and table headers.|
-| `--bg3`| Yes      | Floating surfaces (hovercard, findbar, command palette, shortcut cheatsheet, toast), row hover state, keycaps, badge fills.|
-| `--bg4`| Yes      | Small button hovers (close tab, status bar icons), active status buttons, double-click occurrence highlight, scrollbar thumb.|
+| Token   | Required | Controls |
+| ------- | -------- | -------- |
+| `--bg`  | Yes | Editor and Monaco background, inputs, the workbench background, the Markdown preview. |
+| `--bg2` | Yes | Title bar, activity bar, side bar, tab bar, panel, status bar; menus, notifications, dialogs, Monaco widgets and hovers. |
+| `--bg3` | Yes | Hover state of rows, buttons and menu items; keycaps; Monaco suggest and peek title. |
+| `--bg4` | Yes | Selected rows, badges, secondary buttons, widget and input borders. |
 
-### Text & Contrast Tokens
+### Text
 
-| Token              | Required | Fallback      | Controls                                                                                                              |
-| ------------------ | -------- | ------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `--fg`             | Yes      | -             | Primary text, active file tab, current line number, unstyled identifiers.                                             |
-| `--dim`            | Yes      | -             | Secondary text: inactive tabs, explorer file names, hovercard docs, Markdown blockquotes and footnotes.              |
-| `--faint`          | Yes      | -             | Line numbers, keyboard hints, tree chevrons, close buttons at rest, inactive LSP indicator.                         |
-| `--on-accent`      | No       | `#fff`        | Text rendered on top of an `--accent` background.                                                                     |
-| `--on-badge`       | No       | `var(--bg)`   | Text rendered inside colored badges (symbol kinds, file extensions).                                                  |
-| `--on-mark-active` | No       | `var(--bg)`   | Text of current search/find hit on top of `--mark-active`.                                                             |
+| Token              | Required | Fallback    | Controls |
+| ------------------ | -------- | ----------- | -------- |
+| `--fg`             | Yes      | -           | Primary text; Monaco's default foreground and active line number. |
+| `--dim`            | Yes      | -           | Secondary text: inactive tabs, descriptions, folder names beside files, Markdown blockquotes. |
+| `--faint`          | Yes      | -           | Line numbers, ignored files, hints, indent guides, scrollbar sliders. |
+| `--on-accent`      | No       | `#fff`      | Text on an `--accent` background (primary buttons, badges). |
 
 ### Borders, Accents & Selection
 
-| Token            | Required | Controls                                                                                                |
-| ---------------- | -------- | ------------------------------------------------------------------------------------------------------- |
-| `--line`         | Yes      | Dividers, pane borders, occurrence outlines, Markdown table borders, code block borders.                |
-| `--accent`       | Yes      | Active tab top indicator, input focus borders, resizer drag handle, Ctrl+hover link underlines, button hovers.|
-| `--accent-fg`    | Yes      | Accent-colored text: active inspector tab, palette match characters, Markdown links, status button hovers.|
-| `--sel`          | Yes      | Selected tree row, palette row, native text selection, whole-file selection (Ctrl+A).                   |
-| `--mark`         | Yes      | Background of search and find matches.                                                                  |
-| `--mark-active`  | Yes      | Active find match, minimap match indicators, pulsing LSP status dot.                                   |
-| `--cur`          | Yes      | Active line background and current gutter cell highlight.                                               |
-| `--shadow`       | Yes      | Elevation box-shadow for floating overlays (palette, hovercard, findbar).                                |
+| Token           | Required | Controls |
+| --------------- | -------- | -------- |
+| `--line`        | Yes | Dividers between bars, panes and tabs; Markdown table and code borders. |
+| `--accent`      | Yes | Active tab and activity indicators, focus outlines, primary buttons, Monaco's cursor and peek border. |
+| `--accent-fg`   | Yes | Links, highlighted match characters in quick input, renamed files, quick-diff "changed" bars. |
+| `--sel`         | Yes | Text selection in the page and in Monaco, word and selection highlights. |
+| `--mark`        | Yes | Search matches (Search view, Monaco find, peek views). |
+| `--mark-active` | Yes | The current find match; warnings; modified files (`--git-modified`). |
+| `--cur`         | Yes | Monaco's current line. |
+| `--shadow`      | Yes | Floating surfaces: menus, quick input, notifications, dialogs. |
 
-### Syntax Highlighting Tokens
+### Syntax
 
-Generated by Chroma and formatted using short CSS classes ([`internal/render/render.go`](../../internal/render/render.go)):
+Used by Monaco (through `monacoTheme()`) and by Chroma's short classes in the Markdown preview's code blocks (`.md-code .k`, ...):
 
-| Token   | Class  | Semantic Role                           | Required | Fallback   |
-| ------- | ------ | --------------------------------------- | -------- | ---------- |
-| `--k`   | `.k`   | Keywords (`func`, `return`, `class`)    | Yes      | -          |
-| `--kt`  | `.kt`  | Primitive types (`int`, `string`, `bool`)| No      | `var(--k)` |
-| `--nf`  | `.nf`  | Function names and method calls         | Yes      | -          |
-| `--nc`  | `.nc`  | Classes, structs, interfaces            | No       | `var(--nf)`|
-| `--nb`  | `.nb`  | Built-in functions and standard types   | No       | `var(--nf)`|
-| `--nv`  | `.nv`  | Variables and parameters                | No       | `var(--fg)`|
-| `--no`  | `.no`  | Constants                               | No       | `var(--m)` |
-| `--s`   | `.s`   | String literals and characters          | Yes      | -          |
-| `--m`   | `.m`   | Numeric literals                        | Yes      | -          |
-| `--o`   | `.o`   | Operators (`+`, `-`, `*`, `&&`)         | No       | `var(--fg)`|
-| `--p`   | `.p`   | Punctuation (braces, parentheses, commas)| No      | `var(--dim)`|
-| `--c`   | `.c`   | Comments (italicized)                   | Yes      | -          |
-| `--err` | `.err` | Syntax errors (wavy underline)          | Yes      | -          |
-| `--gi`  | `.gi`  | Git added lines, ready LSP dot          | No       | `var(--s)` |
-| `--gd`  | `.gd`  | Git deleted lines, failed LSP dot       | No       | `var(--err)`|
+| Token   | Role | Required | Fallback |
+| ------- | ---- | -------- | -------- |
+| `--k`   | Keywords | Yes | - |
+| `--kt`  | Types | No | `var(--k)` |
+| `--nf`  | Functions | Yes | - |
+| `--nc`  | Classes, type names, namespaces | No | `var(--nf)` |
+| `--nb`  | Built-ins | No | `var(--nf)` |
+| `--nv`  | Variables, identifiers | No | `var(--fg)` |
+| `--no`  | Constants | No | `var(--m)` |
+| `--na`  | Attribute names | No | `var(--nf)` |
+| `--nt`  | Tags | No | `var(--k)` |
+| `--nd`  | Annotations, decorators | No | `var(--k)` |
+| `--np`  | Keys (JSON keys, properties) | No | `var(--fg)` |
+| `--s`   | Strings | Yes | - |
+| `--m`   | Numbers | Yes | - |
+| `--o`   | Operators | No | `var(--fg)` |
+| `--p`   | Punctuation, delimiters | No | `var(--dim)` |
+| `--c`   | Comments | Yes | - |
+| `--cp`  | Preprocessor, meta tags | No | `var(--k)` |
+| `--err` | Errors, invalid tokens, conflicts | Yes | - |
 
-## 5. Table Preview Styling
+### Git and Diff
 
-CSV and TSV tabs render inside `#mdview` with the article's class switched from `md` to `csv`, so no `.md` rule reaches the table. Every rule is scoped under `#md.csv` / `.csv-t` in [`web/style.css`](../../web/style.css) and takes its colours from the tokens above, which is why no theme needs table-specific values:
+| Token | Fallback | Controls |
+| ----- | -------- | -------- |
+| `--gi` | `var(--s)` | Added and untracked files, quick-diff "added" bars, inserted text in diffs. |
+| `--gd` | `var(--err)` | Deleted files, quick-diff "removed" markers, removed text in diffs. |
+| `--gi-bg`, `--gd-bg` | `transparent` | Whole-line backgrounds of inserted and removed lines in the diff editor. |
+| `--git-modified`, `--git-added`, `--git-untracked`, `--git-deleted`, `--git-conflict`, `--git-renamed` | derived in `app.css` | Explorer, tab and Source Control colours per status. A theme may override them. |
 
-| Element | Tokens |
-| --- | --- |
-| Header row (sticky `th`) | `--bg2` background, `--line` rule |
-| Alternate rows | `--cur` |
-| Column dividers, gutter edge | `--line` (inset box-shadows, so sticky cells keep their borders) |
-| Line-number gutter (sticky) | `--faint` text on `--bg` |
-| Missing cells | hatched `--bg3` |
-| Find matches | `--mark`, `--mark-active` / `--on-mark-active` |
-| Row-cap footer | `--dim` text, `--accent-fg` button |
+## 6. Markdown Preview and Mermaid
 
-## 6. Mermaid Diagram Styling
+The preview's styles read only the tokens above, so no theme needs preview-specific values. Alerts set a local `--alert` from existing tokens. Mermaid diagrams render inside `.md-mermaid` using `--bg2`, `--bg3`, `--bg4`, `--line` and `--err`; Mermaid itself gets a `base` theme derived from the active px0 theme's `--bg`, `--bg2`, `--bg3`, `--fg`, `--dim` and `--line`. `theme:changed` re-renders open previews so diagrams follow the theme. Repository-supplied SVG is removed by the sanitizer; only SVG generated by the pinned, strict-mode Mermaid runtime reaches `.md-mermaid`.
 
-Mermaid fences render inside `.md-mermaid`, a tokenized, scrollable surface using `--bg2`, `--bg3`, `--bg4`, `--line`, and `--err`; generated SVG is constrained to the article width. Each diagram's controls toolbar provides zoom in/out, fit, and full-screen maximize using those same tokens, scaling only its `.md-mermaid-canvas`. In full-screen mode (`.md-mermaid.is-fullscreen`), the surface takes over the full viewport using `--bg`, locks `document.body` scroll via `.mermaid-fs-active`, pins the controls to the top-left, and provides dedicated close buttons (`.md-mermaid-fs-close` in the top-right corner and `.md-mermaid-fs-only` in the toolbar) for easy zoom and `Esc` dismissal. Mermaid itself receives a `base` theme derived from the active px0 theme's `--bg`, `--bg2`, `--bg3`, `--fg`, `--dim`, and `--line` values. `setTheme` emits `theme:changed`, and the Markdown preview debounces a rerender of the active diagrams so both palette previews and persisted theme changes remain readable.
+## Workbench surfaces and file icons
 
-Repository-supplied SVG is still removed by the Markdown sanitizer. Only SVG generated after sanitization by the pinned, strict-mode Mermaid runtime reaches `.md-mermaid`.
+The optional semantic tokens name VS Code's workbench colours, so a theme can match VS Code exactly; `app.css` derives every one of them from the base tokens, so other themes need none:
 
+| Tokens | VS Code colours |
+| ------ | --------------- |
+| `--shell`, `--card-border`, `--sidebar-bg`, `--panel-bg`, `--editor-bg` | window (title bar, status bar) background, the floating parts' borders and backgrounds |
+| `--tab-strip`, `--tab-hover`, `--tab-active-fg`, `--tab-inactive-fg` | connected tab strip, tab hover, tab foregrounds |
+| `--active-fg`, `--icon-fg`, `--title-fg`, `--status-fg`, `--status-hover`, `--desc-fg`, `--disabled-fg` | emphasized text, icons, title bar and status bar foregrounds, description and disabled text |
+| `--focus`, `--sash`, `--highlight-fg` | focus border, sash hover, matched characters in lists |
+| `--list-hover`, `--list-active`, `--list-selection`, `--list-active-fg`, `--toolbar-hover` | list hover, focused and unfocused selection, toolbar button hover |
+| `--activity-fg`, `--activity-muted`, `--activity-active-bg`, `--badge-bg`, `--badge-fg` | activity bar icons and active indicator, count badges |
+| `--button-*`, `--button2-*` | primary and secondary buttons |
+| `--input-bg`, `--input-border`, `--input-placeholder`, `--option-active-bg`, `--option-active-border` | inputs and their toggles (Match Case, ...) |
+| `--widget-bg`, `--widget-border`, `--quick-input-bg`, `--qi-focus-bg`, `--qi-focus-fg` | widgets, notifications, dialogs; quick input and its focused row |
+| `--menu-bg`, `--menu-border`, `--menu-sep`, `--menu-hover`, `--menu-focus-border` | context and application menus |
+| `--kb-bg`, `--kb-border`, `--kb-bottom`, `--kb-fg`, `--kb-shadow` | keybinding key caps |
+| `--command-bg`, `--command-border`, `--command-hover-bg`, `--command-hover-border` | the command center |
+| `--letterpress`, `--warn`, `--info`, `--error-icon`, `--git-ignored`, `--code-bg`, `--quote-bg`, `--quote-border` | the empty editor's letterpress, problem icons, ignored files, code and quote blocks |
+
+The VS Code themes also set `--line-number`, `--cursor` and `--comment-style`; `theme.js` maps these and the widget/list colours into Monaco.
+
+`web/src/icons.js` resolves VS Code Seti filename, compound extension and language associations from `web/src/gen/seti.js`. The pinned upstream revision is recorded in that file. `web/src/fonts/seti.woff` is bundled into `web/dist/` and embedded with the frontend; the font needs no network access. Light/dark icon colours follow the theme's `color-scheme`. The upstream notice is preserved in `web/vendor/LICENSE.seti`.
+
+The bundler extracts inline font data from generated CSS into content-addressed font assets before compression. This keeps fonts same-origin under the existing Content Security Policy, including workspaces served under a base path.

@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -191,7 +192,7 @@ func TestWorkbenchBrowseListsOnlyFolders(t *testing.T) {
 	os.Mkdir(filepath.Join(dir, "plain"), 0o755)
 	os.Mkdir(filepath.Join(dir, ".hidden"), 0o755)
 	os.WriteFile(filepath.Join(dir, "file.txt"), nil, 0o644)
-	wb := newWorkbench("/", dir, "", nil)
+	wb := newWorkbench("/", dir, "", nil, nil)
 
 	get := func(target, host string) *httptest.ResponseRecorder {
 		r := httptest.NewRequest("GET", target, nil)
@@ -217,7 +218,7 @@ func TestWorkbenchBrowseListsOnlyFolders(t *testing.T) {
 
 func TestWorkbenchOpenRequiresLocalPost(t *testing.T) {
 	newTestStore(t)
-	wb := newWorkbench("/", t.TempDir(), "", nil)
+	wb := newWorkbench("/", t.TempDir(), "", nil, nil)
 	r := httptest.NewRequest("POST", "/api/wb/open", strings.NewReader(`{"target":"."}`))
 	r.Host = "127.0.0.1:7777"
 	r.Header.Set("Origin", "https://evil.example")
@@ -233,7 +234,7 @@ func TestWorkbenchOpenRequiresLocalPost(t *testing.T) {
 
 func TestWorkbenchUnknownWorkspace(t *testing.T) {
 	newTestStore(t)
-	wb := newWorkbench("/", t.TempDir(), "", nil)
+	wb := newWorkbench("/", t.TempDir(), "", nil, nil)
 	r := httptest.NewRequest("GET", "/w/000000000000/", nil)
 	r.Host = "127.0.0.1:7777"
 	w := httptest.NewRecorder()
@@ -263,7 +264,7 @@ func TestWorkbenchRunsChildThroughProxy(t *testing.T) {
 	ws := t.TempDir()
 	os.WriteFile(filepath.Join(ws, "hello.go"), []byte("package hello\n"), 0o644)
 
-	wb := newWorkbench("/base/", ws, exe, []string{"-no-lsp", "-no-agent", "-no-telemetry"})
+	wb := newWorkbench("/base/", ws, exe, []string{"-no-lsp"}, nil)
 	srv := httptest.NewServer(wb)
 	defer srv.Close()
 	defer wb.Close()
@@ -355,7 +356,7 @@ func TestWorkbenchForgetsNewItemThatFails(t *testing.T) {
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "fake-px0")
 	os.WriteFile(exe, []byte("#!/bin/sh\necho 'px0: px0: github: fetch PR #9: 404 Not Found' >&2\nexit 1\n"), 0o755)
-	wb := newWorkbench("/", dir, exe, nil)
+	wb := newWorkbench("/", dir, exe, nil, nil)
 	defer wb.Close()
 
 	it := wbPRItem(PRTarget{Provider: "github", Owner: "o", Repo: "r", Number: 9, URL: "https://github.com/o/r/pull/9"})
@@ -452,7 +453,7 @@ func postJSON(t *testing.T, h http.Handler, path, body string) *httptest.Respons
 func TestWorkbenchOpenPRAsksForClone(t *testing.T) {
 	newTestStore(t)
 	t.Setenv("HOME", t.TempDir()) // keep the scan away from real code folders
-	wb := newWorkbench("/", t.TempDir(), "/nonexistent/px0", nil)
+	wb := newWorkbench("/", t.TempDir(), "/nonexistent/px0", nil, nil)
 	defer wb.Close()
 	pr := "https://github.com/acme/widget/pull/5"
 
@@ -493,7 +494,7 @@ func TestWorkbenchCompleteFolders(t *testing.T) {
 	}
 	os.WriteFile(filepath.Join(dir, "profile.txt"), nil, 0o644)
 	os.MkdirAll(filepath.Join(dir, "proto", ".git"), 0o755)
-	wb := newWorkbench("/", dir, "", nil)
+	wb := newWorkbench("/", dir, "", nil, nil)
 
 	complete := func(q string) []wbEntry {
 		r := httptest.NewRequest("GET", "/api/wb/complete?q="+url.QueryEscape(q), nil)
@@ -531,7 +532,7 @@ func TestWorkbenchCompleteFolders(t *testing.T) {
 func TestWorkbenchSettingsOnlyTakesTheme(t *testing.T) {
 	newTestStore(t)
 	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
-	wb := newWorkbench("/", t.TempDir(), "", nil)
+	wb := newWorkbench("/", t.TempDir(), "", nil, nil)
 	if w := postJSON(t, wb, "/api/settings", `{"github.token":"x"}`); w.Code != http.StatusBadRequest {
 		t.Fatalf("token accepted: %d", w.Code)
 	}
@@ -545,7 +546,7 @@ func TestWorkbenchSettingsOnlyTakesTheme(t *testing.T) {
 
 func TestWorkbenchPinAndRemove(t *testing.T) {
 	st := newTestStore(t)
-	wb := newWorkbench("/", t.TempDir(), "", nil)
+	wb := newWorkbench("/", t.TempDir(), "", nil, nil)
 	wb.store = st
 
 	it := wbDirItem("/work/test-repo")
@@ -616,3 +617,141 @@ func TestWorkbenchLockLifecycle(t *testing.T) {
 	}
 }
 
+func TestScanReposStopsAtRepositories(t *testing.T) {
+	root := t.TempDir()
+	for _, d := range []string{
+		"a/.git",                    // a repository
+		"a/nested/.git",             // inside a: not descended into
+		"group/b/.git",              // two levels down
+		"group/node_modules/c/.git", // skipped folder
+		".hidden/d/.git",            // hidden folder
+		"plain/sub",
+	} {
+		os.MkdirAll(filepath.Join(root, filepath.FromSlash(d)), 0o755)
+	}
+	repos, truncated := scanRepos(context.Background(), []string{root})
+	if truncated {
+		t.Fatal("small tree reported as truncated")
+	}
+	want := []string{filepath.Join(root, "a"), filepath.Join(root, "group", "b")}
+	if strings.Join(repos, "|") != strings.Join(want, "|") {
+		t.Fatalf("got %v, want %v", repos, want)
+	}
+	// A root that is itself a repository is listed, not descended into.
+	if repos, _ := scanRepos(context.Background(), []string{filepath.Join(root, "a")}); len(repos) != 1 || repos[0] != filepath.Join(root, "a") {
+		t.Fatalf("repository root: got %v", repos)
+	}
+}
+
+func TestParseRepoStatus(t *testing.T) {
+	out := "# branch.oid abc\n# branch.head main\n# branch.upstream origin/main\n# branch.ab +2 -1\n" +
+		"1 M. N... 100644 100644 100644 a b x.go\n" +
+		"1 .M N... 100644 100644 100644 a b y.go\n" +
+		"1 MM N... 100644 100644 100644 a b z.go\n" +
+		"2 R. N... 100644 100644 100644 a b R100 new.go\told.go\n" +
+		"u UU N... 100644 100644 100644 100644 a b c conflict.go\n" +
+		"? new.txt\n? other.txt\n"
+	got := parseRepoStatus(out)
+	want := wbRepoStatus{Branch: "main", Upstream: "origin/main", Ahead: 2, Behind: 1, Staged: 3, Changed: 2, Untracked: 2, Conflicts: 1}
+	if got != want {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+}
+
+func TestWorkbenchRootsConfineBrowseAndOpen(t *testing.T) {
+	newTestStore(t)
+	top := t.TempDir()
+	inside := filepath.Join(top, "inside")
+	outside := filepath.Join(top, "outside")
+	os.MkdirAll(filepath.Join(inside, "repo", ".git"), 0o755)
+	os.MkdirAll(outside, 0o755)
+	roots, err := parseRoots(inside, top)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wb := newWorkbench("/", outside, "", nil, roots)
+	if wb.cwd != roots[0] {
+		t.Fatalf("cwd outside the roots should move into them, got %q", wb.cwd)
+	}
+	get := func(target string) *httptest.ResponseRecorder {
+		r := httptest.NewRequest("GET", target, nil)
+		r.Host = "127.0.0.1:7777"
+		w := httptest.NewRecorder()
+		wb.ServeHTTP(w, r)
+		return w
+	}
+	if w := get("/api/wb/browse?path=" + url.QueryEscape(outside)); w.Code != http.StatusForbidden {
+		t.Fatalf("browse outside: got %d", w.Code)
+	}
+	// The folder above a root can be walked through, showing only the way in.
+	w := get("/api/wb/browse?path=" + url.QueryEscape(top))
+	var res struct {
+		Entries []wbEntry `json:"entries"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &res)
+	if w.Code != http.StatusOK || len(res.Entries) != 1 || res.Entries[0].Name != "inside" {
+		t.Fatalf("browse above root: %d %+v", w.Code, res.Entries)
+	}
+	if _, err := wb.resolveTarget(outside); err == nil {
+		t.Fatal("opening outside the roots should fail")
+	}
+	if it, err := wb.resolveTarget(filepath.Join(inside, "repo")); err != nil || it.Path != filepath.Join(roots[0], "repo") {
+		t.Fatalf("opening inside: %+v %v", it, err)
+	}
+	w = get("/api/wb/repos")
+	var repos struct {
+		Repos []wbRepo `json:"repos"`
+	}
+	json.Unmarshal(w.Body.Bytes(), &repos)
+	if len(repos.Repos) != 1 || repos.Repos[0].Name != "repo" || repos.Repos[0].ID != wbItemID("dir", repos.Repos[0].Path) {
+		t.Fatalf("repos: %s", w.Body.String())
+	}
+	if _, err := parseRoots(filepath.Join(top, "missing"), top); err == nil {
+		t.Fatal("a missing root should be an error")
+	}
+}
+
+func TestWorkbenchRepoStatus(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	newTestStore(t)
+	dir := t.TempDir()
+	repo := filepath.Join(dir, "repo")
+	os.MkdirAll(repo, 0o755)
+	if out, err := exec.Command("git", "-C", repo, "init", "-q", "-b", "trunk").CombinedOutput(); err != nil {
+		t.Skip("git init: ", string(out))
+	}
+	os.WriteFile(filepath.Join(repo, "a.txt"), []byte("a\n"), 0o644)
+	wb := newWorkbench("/", dir, "", nil, nil)
+	r := httptest.NewRequest("GET", "/api/wb/repostatus?path="+url.QueryEscape(repo), nil)
+	r.Host = "127.0.0.1:7777"
+	w := httptest.NewRecorder()
+	wb.ServeHTTP(w, r)
+	var st wbRepoStatus
+	if err := json.Unmarshal(w.Body.Bytes(), &st); err != nil || w.Code != http.StatusOK {
+		t.Fatalf("%d %s", w.Code, w.Body.String())
+	}
+	if st.Branch != "trunk" || st.Untracked != 1 {
+		t.Fatalf("got %+v", st)
+	}
+	r = httptest.NewRequest("GET", "/api/wb/repostatus?path="+url.QueryEscape(dir), nil)
+	r.Host = "127.0.0.1:7777"
+	w = httptest.NewRecorder()
+	wb.ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("not a repository: got %d", w.Code)
+	}
+}
+
+func BenchmarkScanRepos(b *testing.B) {
+	root := b.TempDir()
+	for i := 0; i < 30; i++ {
+		os.MkdirAll(filepath.Join(root, "g", strconv.Itoa(i), ".git"), 0o755)
+		os.MkdirAll(filepath.Join(root, "p", strconv.Itoa(i), "src", "x"), 0o755)
+	}
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		scanRepos(context.Background(), []string{root})
+	}
+}

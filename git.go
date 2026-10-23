@@ -1,14 +1,17 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/url"
 	"os"
 	"os/exec"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -304,89 +307,6 @@ func gitStagedFiles(root string) []string {
 	return files
 }
 
-// gitStagedStat returns the diffstat summary of staged changes against HEAD.
-// Fails quiet -> "".
-func gitStagedStat(root string) string {
-	if !gitAvailable(root) {
-		return ""
-	}
-	out, err := exec.Command("git", "-C", root, "diff", "--stat", "--cached").Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
-}
-
-const (
-	maxStagedDiffBytes = 32 * 1024 // 32 KB limit on staged diff to stay safely under ARG_MAX / MAX_ARG_STRLEN
-)
-
-var lockfileExclusions = []string{
-	":(exclude)*package-lock.json",
-	":(exclude)*yarn.lock",
-	":(exclude)*pnpm-lock.yaml",
-	":(exclude)*go.sum",
-	":(exclude)*Cargo.lock",
-	":(exclude)*composer.lock",
-	":(exclude)*poetry.lock",
-	":(exclude)*Gemfile.lock",
-	":(exclude)*.min.js",
-	":(exclude)*.min.css",
-	":(exclude)*.map",
-}
-
-// gitStagedDiff returns the unified diff of the index (staged changes)
-// against HEAD, for handing to a coding harness asked to write a commit
-// message. Large diffs are capped to maxStagedDiffBytes and noise files
-// (lockfiles, minified assets) are excluded when other changes exist.
-// Fails quiet -> "".
-func gitStagedDiff(root string) string {
-	return gitPromptDiff(root, "--cached")
-}
-
-// gitRangeDiff is gitStagedDiff for the commits between from and to: what a
-// squash of a PR would land, trimmed the same way for a harness prompt.
-func gitRangeDiff(root, from, to string) string {
-	return gitPromptDiff(root, from, to)
-}
-
-// gitRangeStat is the diffstat between from and to.
-func gitRangeStat(root, from, to string) string {
-	if !gitAvailable(root) {
-		return ""
-	}
-	out, err := exec.Command("git", "-C", root, "diff", "--stat", from, to).Output()
-	if err != nil {
-		return ""
-	}
-	return strings.TrimSpace(string(out))
-}
-
-func gitPromptDiff(root string, diffArgs ...string) string {
-	if !gitAvailable(root) {
-		return ""
-	}
-	base := append([]string{"-C", root, "diff", "--no-color"}, diffArgs...)
-	// Try fetching the diff excluding high-noise files (lockfiles, minified bundles)
-	cmdArgs := append(append(append([]string(nil), base...), "--", "."), lockfileExclusions...)
-	out, err := exec.Command("git", cmdArgs...).Output()
-	if err != nil || len(strings.TrimSpace(string(out))) == 0 {
-		// Fallback to unfiltered diff if excluded diff was empty or failed (e.g. only lockfiles were modified)
-		out, err = exec.Command("git", base...).Output()
-		if err != nil {
-			return ""
-		}
-	}
-	if len(out) > maxStagedDiffBytes {
-		cut := maxStagedDiffBytes
-		if idx := bytes.LastIndexByte(out[:cut], '\n'); idx > 0 {
-			cut = idx
-		}
-		return string(out[:cut]) + "\n\n[Diff truncated: showing first 32KB. See changed files and summary above for full list of changes]"
-	}
-	return string(out)
-}
-
 // gitHasUncommittedChanges reports whether the working tree or index has any
 // changes at all (staged, unstaged, or untracked). Used to gate commit and
 // pull -- a pull is refused outright when there's anything uncommitted,
@@ -402,36 +322,161 @@ func gitHasUncommittedChanges(root string) bool {
 	return len(strings.TrimSpace(string(out))) > 0
 }
 
+// gitCmd is a git command run in root on the user's behalf: it never prompts
+// for credentials, never takes the optional index lock a git running in a
+// terminal would trip over, and reads every pathspec literally, so a file
+// named "*.go" means that file and not every Go file.
+func gitCmd(root string, args ...string) *exec.Cmd {
+	cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0", "GIT_LITERAL_PATHSPECS=1")
+	return cmd
+}
+
+// gitArgBytes bounds the paths one gitPaths invocation carries. Windows caps a
+// whole command line at 32K characters; Linux allows far more, but a selection
+// of thousands of files is rare enough that a few extra processes cost nothing.
+const gitArgBytes = 16 << 10
+
+// gitPaths runs `git <args> -- <paths>` for root-relative paths ("" is the
+// served root itself), splitting a long list over as many invocations as it
+// takes, and returns their stdout joined. An error carries git's own message.
+func gitPaths(root string, args []string, paths []string) ([]byte, error) {
+	var out []byte
+	for len(paths) > 0 {
+		n, size := 0, 0
+		for n < len(paths) && (n == 0 || size+len(paths[n]) < gitArgBytes) {
+			size += len(paths[n]) + 1
+			n++
+		}
+		argv := append(append([]string(nil), args...), "--")
+		for _, p := range paths[:n] {
+			if p == "" {
+				p = "."
+			}
+			argv = append(argv, p)
+		}
+		b, err := gitCmd(root, argv...).Output()
+		if err != nil {
+			var ee *exec.ExitError
+			if errors.As(err, &ee) && len(ee.Stderr) > 0 {
+				return out, fmt.Errorf("%w: %s", err, strings.TrimSpace(string(ee.Stderr)))
+			}
+			return out, err
+		}
+		out = append(out, b...)
+		paths = paths[n:]
+	}
+	return out, nil
+}
+
 // gitStage adds relpath to the index. An empty relpath (the served root
 // itself) means "stage everything", so a bare "Stage All" action can reuse
 // this instead of a separate endpoint.
 func gitStage(root, relpath string) error {
-	if relpath == "" {
-		relpath = "."
-	}
-	out, err := exec.Command("git", "-C", root, "add", "-A", "--", relpath).CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("git add: %w: %s", err, strings.TrimSpace(string(out)))
+	return gitStagePaths(root, []string{relpath})
+}
+
+// gitStagePaths stages each root-relative path: modifications, deletions and
+// untracked files alike, which is what `git add -A` does for a pathspec.
+func gitStagePaths(root string, paths []string) error {
+	if _, err := gitPaths(root, []string{"add", "-A"}, paths); err != nil {
+		return fmt.Errorf("git add: %w", err)
 	}
 	return nil
 }
 
 // gitUnstage removes relpath from the index without touching the working tree.
 func gitUnstage(root, relpath string) error {
-	if relpath == "" {
-		relpath = "."
+	return gitUnstagePaths(root, []string{relpath})
+}
+
+// gitUnstagePaths is gitUnstage for several paths at once.
+func gitUnstagePaths(root string, paths []string) error {
+	_, err := gitPaths(root, []string{"reset", "-q", "HEAD"}, paths)
+	if err == nil {
+		return nil
 	}
-	out, err := exec.Command("git", "-C", root, "reset", "HEAD", "--", relpath).CombinedOutput()
-	if err != nil {
-		// On an unborn HEAD (a repository with no commits yet), `git reset`
-		// fails because HEAD does not resolve; `git rm --cached` removes the
-		// path from the index without touching the working tree.
-		if _, rmErr := exec.Command("git", "-C", root, "rm", "-r", "--cached", "--", relpath).CombinedOutput(); rmErr == nil {
+	// On an unborn HEAD (a repository with no commits yet), `git reset`
+	// fails because HEAD does not resolve; `git rm --cached` removes the
+	// paths from the index without touching the working tree. Only then:
+	// anywhere else it would stage the paths' deletion instead.
+	if gitCmd(root, "rev-parse", "--verify", "-q", "HEAD").Run() != nil {
+		if _, rmErr := gitPaths(root, []string{"rm", "-r", "-q", "--cached", "--ignore-unmatch"}, paths); rmErr == nil {
 			return nil
 		}
-		return fmt.Errorf("git reset: %w: %s", err, strings.TrimSpace(string(out)))
 	}
-	return nil
+	return fmt.Errorf("git reset: %w", err)
+}
+
+// gitDiscardPaths throws away the working tree's changes under each
+// root-relative path, the way an editor's "Discard Changes" does: tracked
+// files go back to what the index holds, so staged work survives, and
+// untracked files are deleted. Ignored files are never touched, and neither
+// is a repository nested inside the workspace. It returns the root-relative
+// files it deleted.
+func gitDiscardPaths(root string, paths []string) (removed []string, err error) {
+	if !gitAvailable(root) {
+		return nil, errors.New("git repository not available")
+	}
+	out, err := gitPaths(root, []string{"ls-files", "-z"}, paths)
+	if err != nil {
+		return nil, fmt.Errorf("git ls-files: %w", err)
+	}
+	// A requested path is restored when the index has it, or has anything
+	// under it: restore refuses a pathspec that matches nothing tracked.
+	known := map[string]bool{}
+	for _, f := range strings.Split(string(out), "\x00") {
+		for f != "" && !known[f] {
+			known[f] = true
+			i := strings.LastIndexByte(f, '/')
+			if i < 0 {
+				break
+			}
+			f = f[:i]
+		}
+	}
+	var tracked []string
+	for _, p := range paths {
+		if known[p] {
+			tracked = append(tracked, p)
+		}
+	}
+	if len(tracked) > 0 {
+		if _, err := gitPaths(root, []string{"restore", "--worktree"}, tracked); err != nil {
+			// git before 2.23 has no restore; checkout -- reads the index too.
+			if _, err2 := gitPaths(root, []string{"checkout"}, tracked); err2 != nil {
+				return nil, fmt.Errorf("git restore: %w", err)
+			}
+		}
+	}
+
+	out, err = gitPaths(root, []string{"ls-files", "-z", "--others", "--exclude-standard"}, paths)
+	if err != nil {
+		return nil, fmt.Errorf("git ls-files: %w", err)
+	}
+	for _, f := range strings.Split(string(out), "\x00") {
+		// A trailing slash is a nested repository, listed whole: never removed.
+		if f == "" || strings.HasSuffix(f, "/") {
+			continue
+		}
+		clean := filepath.Clean(filepath.FromSlash(f))
+		if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || filepath.IsAbs(clean) {
+			continue
+		}
+		abs := filepath.Join(root, clean)
+		if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {
+			return removed, err
+		}
+		removed = append(removed, filepath.ToSlash(clean))
+		// Folders that held nothing but what was just deleted go too: git
+		// would not have kept them, and the tree would show them empty.
+		for dir := filepath.Dir(abs); dir != root && strings.HasPrefix(dir, root+string(filepath.Separator)); dir = filepath.Dir(dir) {
+			if os.Remove(dir) != nil {
+				break
+			}
+		}
+	}
+	return removed, nil
 }
 
 // gitApplyHunk applies a single unified diff hunk for relpath to the index
@@ -487,112 +532,6 @@ func gitApplyHunk(root, relpath, hunk, action string) error {
 	return nil
 }
 
-// gitSnapshotWorktree captures the entire working tree (including unstaged and
-// untracked files) as a ref-free commit SHA in the repository's object database
-// using a temporary index in os.TempDir(). Neither HEAD nor the real git index
-// is modified. Returns "" if git is unavailable or the snapshot fails.
-func gitSnapshotWorktree(root string) string {
-	info := gitProbe(root)
-	if !info.ok {
-		return ""
-	}
-	tmpFile, err := os.CreateTemp("", "px0-idx-*")
-	if err != nil {
-		return ""
-	}
-	tmpIdx := tmpFile.Name()
-	tmpFile.Close()
-	defer os.Remove(tmpIdx)
-
-	// Seed the temp index from the real index so git add only hashes modified/untracked files.
-	realIdx := filepath.Join(info.gitdir, "index")
-	if data, err := os.ReadFile(realIdx); err == nil {
-		_ = os.WriteFile(tmpIdx, data, 0o600)
-	} else {
-		_ = os.Remove(tmpIdx)
-	}
-
-	env := append(os.Environ(),
-		"GIT_INDEX_FILE="+tmpIdx,
-		"GIT_AUTHOR_NAME=px0",
-		"GIT_AUTHOR_EMAIL=px0@localhost",
-		"GIT_COMMITTER_NAME=px0",
-		"GIT_COMMITTER_EMAIL=px0@localhost",
-	)
-
-	addCmd := exec.Command("git", "-C", root, "add", "-A")
-	addCmd.Env = env
-	if addCmd.Run() != nil {
-		return ""
-	}
-
-	wtCmd := exec.Command("git", "-C", root, "write-tree")
-	wtCmd.Env = env
-	treeOut, err := wtCmd.Output()
-	if err != nil {
-		return ""
-	}
-	treeSHA := strings.TrimSpace(string(treeOut))
-	if !validSHA(treeSHA) {
-		return ""
-	}
-
-	ctArgs := []string{"-C", root, "commit-tree", treeSHA, "-m", "px0 turn snapshot"}
-	if headOut, err := exec.Command("git", "-C", root, "rev-parse", "--verify", "HEAD").Output(); err == nil {
-		if headSHA := strings.TrimSpace(string(headOut)); validSHA(headSHA) {
-			ctArgs = []string{"-C", root, "commit-tree", treeSHA, "-p", headSHA, "-m", "px0 turn snapshot"}
-		}
-	}
-	ctCmd := exec.Command("git", ctArgs...)
-	ctCmd.Env = env
-	commitOut, err := ctCmd.Output()
-	if err != nil {
-		return ""
-	}
-	sha := strings.TrimSpace(string(commitOut))
-	if !validSHA(sha) {
-		return ""
-	}
-	return sha
-}
-
-// gitRestoreSnapshotPaths restores the specified root-relative paths to their
-// state in snapshotSHA, removing any path that did not exist in snapshotSHA.
-func gitRestoreSnapshotPaths(root, snapshotSHA string, paths []string) error {
-	info := gitProbe(root)
-	if !info.ok {
-		return errors.New("git repository not available")
-	}
-	if !validSHA(snapshotSHA) {
-		return errors.New("invalid snapshot SHA")
-	}
-	for _, rel := range paths {
-		clean := filepath.Clean(filepath.FromSlash(rel))
-		if clean == "." || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) || filepath.IsAbs(clean) {
-			continue
-		}
-		abs := filepath.Join(root, clean)
-		repoRel, err := filepath.Rel(info.toplevel, abs)
-		if err != nil {
-			continue
-		}
-		repoRel = filepath.ToSlash(repoRel)
-
-		// Check if the path existed in snapshotSHA.
-		if exec.Command("git", "-C", info.toplevel, "cat-file", "-e", snapshotSHA+":"+repoRel).Run() == nil {
-			if out, err := exec.Command("git", "-C", info.toplevel, "checkout", snapshotSHA, "--", repoRel).CombinedOutput(); err != nil {
-				return fmt.Errorf("git checkout %s: %w: %s", rel, err, strings.TrimSpace(string(out)))
-			}
-			// Reset index entry to HEAD if HEAD has it, or unstage if it was newly added.
-			_ = exec.Command("git", "-C", info.toplevel, "reset", "-q", "HEAD", "--", repoRel).Run()
-		} else {
-			_ = exec.Command("git", "-C", info.toplevel, "rm", "-f", "--ignore-unmatch", "--cached", "--", repoRel).Run()
-			_ = os.Remove(abs)
-		}
-	}
-	return nil
-}
-
 // gitCommit commits whatever is currently staged. Refuses up front when
 // nothing is staged so the caller gets a clear message instead of git's own
 // "nothing to commit" noise.
@@ -600,9 +539,24 @@ func gitCommit(root, message string) error {
 	if len(gitStagedPaths(root)) == 0 {
 		return errors.New("nothing staged to commit")
 	}
-	out, err := exec.Command("git", "-C", root, "commit", "-m", message).CombinedOutput()
+	out, err := gitCmd(root, "commit", "-m", message).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("git commit: %w: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// gitCommitAmend replaces the last commit with one that also holds whatever
+// is staged now. An empty message keeps the old one; with nothing staged it
+// rewrites just the message.
+func gitCommitAmend(root, message string) error {
+	args := []string{"commit", "--amend", "--no-edit"}
+	if message != "" {
+		args = []string{"commit", "--amend", "-m", message}
+	}
+	out, err := gitCmd(root, args...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git commit --amend: %w: %s", err, strings.TrimSpace(string(out)))
 	}
 	return nil
 }
@@ -639,9 +593,10 @@ func gitFFOnlyPull(root, remote, ref string) error {
 }
 
 // gitOpInProgress names the history-rewriting operation left half-done in
-// the repository -- "rebase" or "merge" -- or "" when there is none. A
-// conflicted rebase or merge (from a harness that gave up, or a terminal)
-// would otherwise just look like a dirty working tree.
+// the repository -- "rebase", "merge", "cherry-pick" or "revert" -- or ""
+// when there is none. Each is abortable with `git <op> --abort`. A conflicted
+// operation (left by a terminal) would otherwise just look like a dirty
+// working tree.
 func gitOpInProgress(root string) string {
 	gd := gitDir(root)
 	if gd == "" {
@@ -656,6 +611,12 @@ func gitOpInProgress(root string) string {
 	}
 	if exists("MERGE_HEAD") {
 		return "merge"
+	}
+	if exists("CHERRY_PICK_HEAD") {
+		return "cherry-pick"
+	}
+	if exists("REVERT_HEAD") {
+		return "revert"
 	}
 	return ""
 }
@@ -695,12 +656,12 @@ func gitAheadBehindRef(root, ref string) (ahead, behind int) {
 	return ahead, behind
 }
 
-// gitAbortOp aborts the rebase or merge in progress, restoring the branch to
+// gitAbortOp aborts the operation in progress (gitOpInProgress), restoring the branch to
 // where it was before that operation started.
 func gitAbortOp(root string) error {
 	op := gitOpInProgress(root)
 	if op == "" {
-		return errors.New("no rebase or merge in progress")
+		return errors.New("no rebase, merge, cherry-pick or revert in progress")
 	}
 	out, err := exec.Command("git", "-C", root, op, "--abort").CombinedOutput()
 	if err != nil {
@@ -777,43 +738,6 @@ func gitAheadBehind(root string) (ahead, behind int, hasUpstream bool) {
 	return 0, 0, false
 }
 
-// gitDiffFull returns the whole unified diff for `git diff <refs...>`, capped at
-// max bytes (with a marker line when cut). Untracked files are not part of a git
-// diff; callers that care list them separately (gitUntracked).
-func gitDiffFull(root string, max int, refs ...string) string {
-	if !gitAvailable(root) {
-		return ""
-	}
-	args := append([]string{"-C", root, "diff", "--no-color", "--no-ext-diff"}, refs...)
-	out, err := exec.Command("git", args...).Output()
-	if err != nil {
-		return ""
-	}
-	if max > 0 && len(out) > max {
-		return string(out[:max]) + "\n… diff truncated; run git diff for the rest …\n"
-	}
-	return string(out)
-}
-
-// gitUntracked lists untracked, non-ignored files relative to the served root.
-func gitUntracked(root string) []string {
-	info := gitProbe(root)
-	if !info.ok {
-		return nil
-	}
-	out, err := exec.Command("git", "-C", root, "ls-files", "--others", "--exclude-standard", "-z").Output()
-	if err != nil {
-		return nil
-	}
-	var files []string
-	for _, p := range strings.Split(string(out), "\x00") {
-		if p != "" {
-			files = append(files, p)
-		}
-	}
-	return files
-}
-
 // gitFilesBetween maps each path that differs between two commits to its
 // name-status letter (A, M, D, R...), relative to the served root (paths outside
 // it are dropped). PR review uses it for the PR's own file set and statuses:
@@ -850,6 +774,46 @@ func gitDiffAgainst(root, relpath, base string) string {
 		return ""
 	}
 	return string(out)
+}
+
+var gitBinaryOnce = sync.OnceValue(func() bool {
+	_, err := exec.LookPath("git")
+	return err == nil
+})
+
+// gitBinary reports whether git is installed, whether or not the workspace is
+// a repository (or git awareness is off): comparing two files only needs it.
+func gitBinary() bool { return gitBinaryOnce() }
+
+// diffFiles is the unified diff from file a to file b. It ignores the user's
+// diff drivers and textconv filters, so what it shows is the files' own text.
+// binary is set when git found either side not to be text.
+func diffFiles(a, b string) (diff string, binary bool, err error) {
+	if !gitBinary() {
+		return "", false, errors.New("comparing files needs git installed")
+	}
+	cmd := exec.Command("git", "diff", "--no-index", "--no-color", "--no-ext-diff", "--no-textconv", "--", a, b)
+	cmd.Dir = filepath.Dir(b)
+	cmd.Env = append(os.Environ(), "GIT_TERMINAL_PROMPT=0", "GIT_OPTIONAL_LOCKS=0")
+	out, err := cmd.Output()
+	// Exit status 1 is git saying the files differ.
+	var ee *exec.ExitError
+	if err != nil && !(errors.As(err, &ee) && ee.ExitCode() == 1) {
+		if ee != nil && len(ee.Stderr) > 0 {
+			return "", false, errors.New(strings.TrimSpace(string(ee.Stderr)))
+		}
+		return "", false, err
+	}
+	diff = string(out)
+	for _, line := range strings.SplitN(diff, "\n", 8) {
+		if strings.HasPrefix(line, "Binary files ") {
+			return diff, true, nil
+		}
+		if strings.HasPrefix(line, "@@") {
+			break
+		}
+	}
+	return diff, false, nil
 }
 
 // gitDiffBetween is gitDiffAgainst generalized to a two-dot diff between two
@@ -959,21 +923,36 @@ func parseNewStart(hdr string) int {
 	return 1
 }
 
-// GitCommit represents a single commit in git log.
+// GitCommit represents a single commit in git log. Hash/Full and Short/SHA
+// say the same things twice: the first pair is what older callers read.
 type GitCommit struct {
-	Hash    string `json:"hash"`
+	Hash    string `json:"hash"` // abbreviated SHA
 	Full    string `json:"full"` // full SHA, what a pinned tab's ref is
+	SHA     string `json:"sha"`  // full SHA
+	Short   string `json:"short"`
 	Subject string `json:"subject"`
 	Author  string `json:"author"`
-	Date    string `json:"date"`
+	Email   string `json:"email"`
+	Date    string `json:"date"` // relative ("2 hours ago")
+	Time    int64  `json:"time"` // author date, unix seconds
 }
 
 // gitRecentCommits returns up to count recent commits from HEAD.
 func gitRecentCommits(root string, count int) []GitCommit {
+	return gitLog(root, count, 0)
+}
+
+// gitLog returns up to count commits reachable from HEAD, newest first,
+// after skipping the skip newest. Empty (never nil) on an unborn HEAD.
+func gitLog(root string, count, skip int) []GitCommit {
 	if count <= 0 {
 		count = 5
 	}
-	out, err := exec.Command("git", "-C", root, "log", fmt.Sprintf("-n%d", count), "--format=%h%x1f%s%x1f%an%x1f%cr%x1f%H").Output()
+	args := []string{"log", fmt.Sprintf("-n%d", count), "--format=%h%x1f%s%x1f%an%x1f%cr%x1f%H%x1f%ae%x1f%at"}
+	if skip > 0 {
+		args = append(args, fmt.Sprintf("--skip=%d", skip))
+	}
+	out, err := gitCmd(root, args...).Output()
 	if err != nil {
 		return []GitCommit{}
 	}
@@ -1000,6 +979,13 @@ func gitRecentCommits(root string, count int) []GitCommit {
 		if len(parts) > 4 {
 			c.Full = parts[4]
 		}
+		if len(parts) > 5 {
+			c.Email = parts[5]
+		}
+		if len(parts) > 6 {
+			c.Time, _ = strconv.ParseInt(parts[6], 10, 64)
+		}
+		c.SHA, c.Short = c.Full, c.Hash
 		commits = append(commits, c)
 	}
 	return commits
@@ -1439,6 +1425,205 @@ func gitCommitsWebURL(root, branch string) string {
 	}
 	return fmt.Sprintf("https://%s/%s/%s", host, path, seg)
 }
+
+/* ---------- the Source Control view ----------
+
+   What an editor's Source Control view lists: the index against HEAD
+   ("Staged Changes"), the working tree against the index ("Changes",
+   untracked files included) and unmerged paths ("Merge Changes"), plus where
+   the branch stands. A file staged and then edited again is in both lists. */
+
+// GitChange is one path in a Source Control group. Status is a single git
+// letter (A M D R C T) for staged entries; M D T, or U for an untracked file,
+// for changes; and git's two-letter code (UU, AA, DU...) for conflicts.
+type GitChange struct {
+	Path   string `json:"path"`
+	Status string `json:"status"`
+	From   string `json:"from,omitempty"` // the original path of a rename or copy
+}
+
+// GitStatusReport is the whole of /api/git/status.
+type GitStatusReport struct {
+	Git       bool        `json:"git"`
+	Branch    string      `json:"branch"`   // "" when detached or unborn without a name
+	Detached  bool        `json:"detached"` // HEAD is not on a branch
+	Head      string      `json:"head"`     // abbreviated HEAD commit; "" on an unborn HEAD
+	HeadFull  string      `json:"headFull"` // full HEAD commit
+	Upstream  string      `json:"upstream"` // e.g. "origin/main"; "" when none is configured
+	Ahead     int         `json:"ahead"`
+	Behind    int         `json:"behind"`
+	Operation string      `json:"operation"` // "", "merge", "rebase", "cherry-pick" or "revert"
+	Staged    []GitChange `json:"staged"`
+	Changes   []GitChange `json:"changes"`
+	Conflicts []GitChange `json:"conflicts"`
+	Truncated bool        `json:"truncated"` // more than gitStatusMax entries; the rest are left out
+}
+
+// gitStatusMax caps the entries a status report lists, across all three
+// groups: a tree with a million untracked files is not a list anyone reads.
+const gitStatusMax = 5000
+
+// gitStatusReport reads root's status for the Source Control view. Not a
+// repository, or git disabled, reports Git false with empty groups.
+func gitStatusReport(root string) GitStatusReport {
+	rep := GitStatusReport{Staged: []GitChange{}, Changes: []GitChange{}, Conflicts: []GitChange{}}
+	info := gitProbe(root)
+	if !info.ok {
+		return rep
+	}
+	out, err := gitCmd(root, "status", "--porcelain=v2", "-z", "--branch", "--untracked-files=all").Output()
+	if err != nil {
+		return rep
+	}
+	rep = parseStatusV2(out, repoRelKey(info, root), gitStatusMax)
+	rep.Operation = gitOpInProgress(root)
+	return rep
+}
+
+// parseStatusV2 parses `git status --porcelain=v2 -z --branch` output. key
+// maps the repository-relative paths git prints to served-root-relative ones,
+// dropping the rest; max caps the entries listed.
+func parseStatusV2(out []byte, key func(string) (string, bool), max int) GitStatusReport {
+	rep := GitStatusReport{Git: true, Staged: []GitChange{}, Changes: []GitChange{}, Conflicts: []GitChange{}}
+	n := 0
+	add := func(list *[]GitChange, c GitChange) {
+		if n >= max {
+			rep.Truncated = true
+			return
+		}
+		n++
+		*list = append(*list, c)
+	}
+	fields := strings.Split(string(out), "\x00")
+	for i := 0; i < len(fields); i++ {
+		f := fields[i]
+		if len(f) < 2 {
+			continue
+		}
+		switch f[0] {
+		case '#': // "# branch.oid <sha>|(initial)", "# branch.head <name>|(detached)", ...
+			k, v, _ := strings.Cut(strings.TrimPrefix(f, "# "), " ")
+			switch k {
+			case "branch.oid":
+				if v != "(initial)" {
+					rep.HeadFull = v
+					rep.Head = v[:min(7, len(v))]
+				}
+			case "branch.head":
+				if v == "(detached)" {
+					rep.Detached = true
+				} else {
+					rep.Branch = v
+				}
+			case "branch.upstream":
+				rep.Upstream = v
+			case "branch.ab": // "+<ahead> -<behind>"
+				a, b, _ := strings.Cut(v, " ")
+				rep.Ahead, _ = strconv.Atoi(strings.TrimPrefix(a, "+"))
+				rep.Behind, _ = strconv.Atoi(strings.TrimPrefix(b, "-"))
+			}
+		case '1', '2': // "1 XY sub mH mI mW hH hI path"; "2 ... Xscore path", then the original path
+			parts := strings.SplitN(f, " ", 9)
+			from := ""
+			if f[0] == '2' {
+				parts = strings.SplitN(f, " ", 10)
+				if i+1 < len(fields) {
+					from = fields[i+1]
+				}
+				i++
+				if len(parts) == 10 {
+					parts = append(parts[:8], parts[9])
+				}
+			}
+			if len(parts) != 9 || len(parts[1]) != 2 {
+				continue
+			}
+			p, ok := key(parts[8])
+			if !ok {
+				continue
+			}
+			x, y := parts[1][0], parts[1][1]
+			if x != '.' {
+				c := GitChange{Path: p, Status: string(x)}
+				if (x == 'R' || x == 'C') && from != "" {
+					if fp, ok := key(from); ok {
+						c.From = fp
+					}
+				}
+				add(&rep.Staged, c)
+			}
+			if y != '.' {
+				add(&rep.Changes, GitChange{Path: p, Status: string(y)})
+			}
+		case 'u': // "u XY sub m1 m2 m3 mW h1 h2 h3 path"
+			parts := strings.SplitN(f, " ", 11)
+			if len(parts) != 11 {
+				continue
+			}
+			if p, ok := key(parts[10]); ok {
+				add(&rep.Conflicts, GitChange{Path: p, Status: parts[1]})
+			}
+		case '?': // "? path"
+			if p, ok := key(f[2:]); ok {
+				add(&rep.Changes, GitChange{Path: p, Status: "U"})
+			}
+		}
+	}
+	return rep
+}
+
+// gitBlob reads root-relative rel as it is at rev, without touching the
+// working tree: rev is a commit-ish, or "" for the index (the staged
+// version). exists is false when rev doesn't resolve or has no such file
+// there -- an unborn HEAD, the parent of a commit that added it. A blob past
+// max is reported by its size and not read; a directory is reported as dir.
+func gitBlob(root, rev, rel string, max int64) (data []byte, size int64, exists, dir bool, err error) {
+	if !gitAvailable(root) {
+		return nil, 0, false, false, errors.New("git repository not available")
+	}
+	// "./" makes the path relative to root, which -C made the working
+	// directory, rather than to the top of the repository.
+	spec := rev + ":./" + rel
+	cmd := gitCmd(root, "cat-file", "--batch")
+	cmd.Stdin = strings.NewReader(spec + "\n")
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, 0, false, false, err
+	}
+	if err := cmd.Start(); err != nil {
+		return nil, 0, false, false, err
+	}
+	defer func() {
+		// Stop reading a blob too large to want; git exits on the closed pipe.
+		cmd.Process.Kill()
+		cmd.Wait()
+	}()
+	br := bufio.NewReader(stdout)
+	header, err := br.ReadString('\n')
+	if err != nil {
+		return nil, 0, false, false, fmt.Errorf("git cat-file: %w", err)
+	}
+	// "<sha> <type> <size>", or "<spec> missing" / "<spec> ambiguous".
+	f := strings.Fields(strings.TrimSuffix(header, "\n"))
+	if len(f) != 3 || !validSHA(f[0]) {
+		return nil, 0, false, false, nil
+	}
+	if size, err = strconv.ParseInt(f[2], 10, 64); err != nil {
+		return nil, 0, false, false, fmt.Errorf("git cat-file: bad size %q", f[2])
+	}
+	if f[1] == "tree" {
+		return nil, size, true, true, nil
+	}
+	if f[1] != "blob" || size > max {
+		return nil, size, true, false, nil
+	}
+	data = make([]byte, size)
+	if _, err := io.ReadFull(br, data); err != nil {
+		return nil, 0, false, false, fmt.Errorf("git cat-file: %w", err)
+	}
+	return data, size, true, false, nil
+}
+
 // GitStatusPayload contains the complete serialized git status event sent to the browser
 // over Server-Sent Events (SSE). It includes working tree status, staged files, dirty directories,
 // current branch, commit ahead/behind counts, and recent commits.
@@ -1493,6 +1678,11 @@ type GitWatcher struct {
 	hasMetaCache   bool
 	lastReady      bool
 	lastInGit      bool
+
+	// untracked is the set of untracked files the last status listed (nil
+	// until the first one). Files appearing in or leaving it were created or
+	// deleted outside px0, which is how the tree learns about them.
+	untracked map[string]bool
 }
 
 // NewGitWatcher constructs a new GitWatcher attached to the given workspace index.
@@ -1701,6 +1891,9 @@ func (gw *GitWatcher) refreshInternal(worktreeOnly bool) (GitStatusPayload, bool
 		changed = true
 	}
 	gw.mu.Unlock()
+	if ready && inGit {
+		gw.syncUntracked(statuses, changed)
+	}
 
 	var recentCommits []GitCommit
 	var ahead, behind int
@@ -1776,6 +1969,66 @@ func (gw *GitWatcher) refreshInternal(worktreeOnly bool) (GitStatusPayload, bool
 		}
 	}
 	return payload, changed
+}
+
+// syncUntracked brings the index up to date with untracked files created or
+// deleted since the last status (by a terminal, a build, another editor),
+// and tells listeners the tree changed shape when any were. Tracked files
+// need no help: a deleted one stays in the tree, badged D.
+func (gw *GitWatcher) syncUntracked(statuses map[string]string, changed bool) {
+	gw.mu.Lock()
+	before := gw.untracked
+	gw.mu.Unlock()
+	if before != nil && !changed {
+		return
+	}
+	now := make(map[string]bool)
+	for p, st := range statuses {
+		if st == "U" {
+			now[p] = true
+		}
+	}
+	gw.mu.Lock()
+	gw.untracked = now
+	gw.mu.Unlock()
+	if before == nil {
+		return // the first status: the walk that built the index saw these
+	}
+	// Only files whose existence the index has wrong: one that stopped being
+	// untracked because it was staged is still there, and one that became
+	// untracked because it was unstaged was there all along.
+	var moved []string
+	for p := range now {
+		if !before[p] && !gw.ix.HasFile(p) {
+			moved = append(moved, p)
+		}
+	}
+	for p := range before {
+		if !now[p] && gw.ix.HasFile(p) {
+			if _, err := os.Lstat(filepath.Join(gw.root, filepath.FromSlash(p))); os.IsNotExist(err) {
+				moved = append(moved, p)
+			}
+		}
+	}
+	for _, p := range moved {
+		// A deleted folder takes its files with it: drop the highest one gone.
+		for dir := path.Dir(p); dir != "." && dir != "/"; dir = path.Dir(dir) {
+			if _, err := os.Lstat(filepath.Join(gw.root, filepath.FromSlash(dir))); err == nil {
+				break
+			}
+			p = dir
+		}
+		gw.ix.TouchPath(p)
+	}
+	if len(moved) > 0 {
+		gw.NotifyTree()
+	}
+}
+
+// NotifyTree tells every listener the workspace's file tree changed shape --
+// a file or folder appeared, moved or went away -- so explorers refetch it.
+func (gw *GitWatcher) NotifyTree() {
+	gw.broadcast([]byte("event: tree\ndata: {}\n\n"))
 }
 
 // aheadBehind counts local commits not yet on the remote. In a PR review the

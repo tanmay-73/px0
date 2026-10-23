@@ -4,15 +4,12 @@ set -eu
 
 VERSION=$(cat VERSION | tr -d ' \r\n')
 OUT=${OUT:-dist}
-POSTHOG_KEY="${POSTHOG_KEY:-${PX0_POSTHOG_KEY:-}}"
 
 LDFLAGS="-s -w"
-if [ -n "$POSTHOG_KEY" ]; then
-  LDFLAGS="$LDFLAGS -X main.posthogKey=$POSTHOG_KEY"
-fi
 
-# Bundle frontend web assets
-./scripts/build-web.js
+# Bundle frontend web assets (needs Bun and `bun install` / `npm install`)
+[ -d node_modules ] || { command -v bun >/dev/null 2>&1 && bun install || npm install --no-audit --no-fund; }
+node ./scripts/build-web.js
 
 TARGETS="
 linux/amd64 linux/arm64 linux/arm linux/386 linux/riscv64

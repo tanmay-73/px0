@@ -1,92 +1,47 @@
 // web/src/outline.js
-import { $, $$, esc, S, doc_, api } from './state.js';
-import { centerLine } from './tabs.js';
-import { render } from './renderer.js';
-import { updateStatus, setLspState } from './status.js';
-import { pushHistory } from './history.js';
+// Explorer's OUTLINE section: the active file's symbols as a tree, following
+// the cursor; click a symbol to go to it.
+import { h, icon, on, debounce } from './util.js';
+import { activeTab, activeEditor, openFile } from './editors.js';
+import { documentSymbols } from './lsp.js';
 
-export async function loadOutline() {
-  const d = doc_();
-  const el = $('#outline');
-  if (!d) { if (el) el.innerHTML = '<div class="hint">No file open.</div>'; return; }
-  if (!d.outline) {
-    try { d.outline = (await api('/api/outline', { path: d.path })).symbols || []; }
-    catch { d.outline = []; }
-  }
-  drawOutline();
-  upgradeOutline(d);
-}
-
-/* A language server's document symbols beat regex on every axis, so swap them
-   in whenever one answers. Panel only: this never moves the viewport. */
-export async function upgradeOutline(d) {
-  if (d.outlineLSP || S.lsp.state === 'off' || S.lsp.state === 'failed') return;
-  d.outlineLSP = true;
-  let j;
-  try { j = await api('/api/lsp/symbols', { path: d.path, wait: 20000 }); }
-  catch { d.outlineLSP = false; return; }
-  setLspState(j);
-  if (!j.symbols || !j.symbols.length) { d.outlineLSP = false; return; }
-  d.outline = j.symbols;
-  d.outlineSource = j.server;
-  if (doc_() === d && $('#panel-outline')?.classList.contains('active')) drawOutline();
-}
-
-export function drawOutline() {
-  const d = doc_();
-  const el = $('#outline');
-  const rel = $('#right-symbols-list');
-  if (!d || !d.outline) {
-    if (el) el.innerHTML = '<div class="hint">No symbols found.</div>';
-    if (rel) rel.innerHTML = '<div class="hint">No symbols found.</div>';
-    return;
-  }
-  const renderSymHtml = (items) => {
-    if (!items.length) return '<div class="hint">No symbols found.</div>';
-    let base = Infinity;
-    for (let i = 0; i < items.length; i++) {
-      if (items[i].indent < base) base = items[i].indent;
-    }
-    return (d.outlineSource ? '<div class="hint"><span class="src">' + esc(d.outlineSource) + '</span> · ' + items.length + ' symbols</div>' : '') +
-      items.map(s =>
-      '<div class="sym" data-n="' + s.line + '" style="padding-left:' + (10 + Math.min(s.indent - base, 16) * 5) + 'px" title="Jump to ' + esc(s.name) + ' at line ' + s.line + '">' +
-      '<span class="kd" data-k="' + esc(s.kind) + '">' + esc(kindLabel(s.kind)) + '</span>' +
-      '<span class="sn">' + esc(s.name) + '</span><span class="sl">' + s.line + '</span></div>').join('');
-  };
-
-  if (el) {
-    const f = ($('#outline-filter')?.value || '').toLowerCase();
-    const syms = f ? d.outline.filter(s => s.name.toLowerCase().includes(f)) : d.outline;
-    el.innerHTML = renderSymHtml(syms);
-  }
-  if (rel) {
-    const rf = ($('#right-symbols-filter')?.value || '').toLowerCase();
-    const rsyms = rf ? d.outline.filter(s => s.name.toLowerCase().includes(rf)) : d.outline;
-    rel.innerHTML = renderSymHtml(rsyms);
-  }
-}
-
-export const KIND_LABEL = {
-  func: 'fn', method: 'fn', fn: 'fn', def: 'fn', defp: 'fn', defmacro: 'mac',
-  class: 'cls', struct: 'str', interface: 'int', trait: 'trt', impl: 'impl',
-  type: 'typ', typealias: 'typ', enum: 'enm', record: 'rec', object: 'obj',
-  const: 'cst', var: 'var', let: 'var', val: 'var',
-  module: 'mod', mod: 'mod', namespace: 'ns', defmodule: 'mod', package: 'pkg',
-  macro: 'mac', extension: 'ext', protocol: 'int', union: 'uni',
-  heading: 'h', sym: '·',
+const KIND_ICON = {
+  func: 'symbol-method', function: 'symbol-method', method: 'symbol-method', class: 'symbol-class', struct: 'symbol-structure',
+  interface: 'symbol-interface', type: 'symbol-class', enum: 'symbol-enum', const: 'symbol-constant', constant: 'symbol-constant',
+  var: 'symbol-variable', variable: 'symbol-variable', field: 'symbol-field', property: 'symbol-property', module: 'symbol-module',
+  namespace: 'symbol-namespace', package: 'symbol-package', heading: 'symbol-string', section: 'symbol-string', key: 'symbol-key',
 };
 
-export function kindLabel(k) { return KIND_LABEL[k] || k.slice(0, 3); }
-
-export function initOutline() {
-  $('#outline')?.addEventListener('click', e => {
-    const s = e.target.closest('.sym');
-    if (!s) return;
-    $$('.sym.sel').forEach(x => x.classList.remove('sel'));
-    s.classList.add('sel');
-    const d = doc_(); if (!d) return;
-    d.cur = +s.dataset.n; centerLine(d.cur); render(); updateStatus();
-    pushHistory(d.path, d.cur);
-  });
-  $('#outline-filter')?.addEventListener('input', drawOutline);
+export function initOutline(p) {
+  let syms = [];
+  let path = '';
+  let seq = 0;
+  const draw = () => {
+    const t = activeTab();
+    if (!t || t.kind !== 'file') { p.body.replaceChildren(h('div.pane-empty', 'The active editor cannot provide outline information.')); return; }
+    if (!syms.length) { p.body.replaceChildren(h('div.pane-empty', 'No symbols found in document \'' + t.path.split('/').pop() + '\'')); return; }
+    const line = activeEditor()?.getPosition()?.lineNumber || 0;
+    let cur = -1;
+    syms.forEach((s, i) => { if (s.line <= line) cur = i; });
+    p.body.replaceChildren(...syms.map((s, i) => h('div.outline-row' + (i === cur ? '.current' : ''), {
+      style: { paddingLeft: 10 + Math.min(s.indent || 0, 8) * 10 + 'px' },
+      on: { click: () => openFile(path, { line: s.line, col: 1 }) },
+    }, icon(KIND_ICON[(s.kind || '').toLowerCase()] || 'symbol-field', 'outline-icon'), h('span.outline-name', s.name), s.detail ? h('span.outline-detail', s.detail) : null)));
+  };
+  const load = debounce(async () => {
+    if (!p.expanded()) return;
+    const t = activeTab();
+    const my = ++seq;
+    if (!t || t.kind !== 'file') { syms = []; draw(); return; }
+    path = t.path;
+    const list = await documentSymbols(t.path);
+    if (my !== seq) return;
+    syms = list;
+    draw();
+  }, 250);
+  on('editor:active', load);
+  on('doc:saved', load);
+  on('editor:cursor', debounce(draw, 100));
+  p.head.addEventListener('click', () => setTimeout(load, 0));
+  load();
 }

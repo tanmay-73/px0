@@ -8,7 +8,7 @@ px0 is architected from the ground up as a remote-first code reading environment
 
 Modern software development frequently takes place across cloud instances (AWS EC2, GCP Compute Engine), remote containers, Kubernetes pods, and devboxes. Traditional remote development setups (such as VS Code Remote-SSH, remote X11 forwarding, or VNC) require multi-step authentication setups, background server daemon installations, high CPU overhead, and significant network bandwidth.
 
-px0 simplifies remote code inspection into a single shell command. Because the entire application—Go backend, HTTP server, assets, and frontend—is compiled into one static ~3.5 MB binary with zero external dependencies, you can copy px0 to any remote Linux, macOS, or BSD machine and spin it up instantly. Connecting via Tailscale, WireGuard, private VPCs, or reverse proxies gives you a fluid, graphical code inspection console in your browser.
+px0 simplifies remote code inspection into a single shell command. Because the entire application—Go backend, HTTP server, assets, and frontend—is compiled into one static binary with zero external dependencies, you can copy px0 to any remote Linux, macOS, or BSD machine and spin it up instantly. Connecting via Tailscale, WireGuard, private VPCs, or reverse proxies gives you a fluid, graphical code inspection console in your browser.
 
 ---
 
@@ -23,7 +23,7 @@ px0 simplifies remote code inspection into a single shell command. Because the e
 - **Built-in Security & Sandboxing**:
   - **Path Traversal Protection**: Enforces strict path sandboxing; requests attempting to escape the workspace root using `../` or symlink cycle attacks are immediately blocked.
   - **DNS Rebinding Defense**: Inspects incoming HTTP `Host` headers to prevent cross-site scripting attacks via malicious DNS records.
-  - **Agent Security Restrictions**: Agent editing commands are permitted only over direct IP addresses or `localhost`. Access over external hostnames or tunnel proxies automatically disables agent modifications to protect remote machines.
+  - **Same-Origin Writes**: Endpoints that change the workspace (saving, creating, renaming and deleting files, and git actions) accept only same-origin POSTs over a direct IP address or `localhost`. Access over external hostnames or tunnel proxies cannot modify the workspace.
 - **Direct Terminal Ergonomics**: Launch px0 targeting specific files or line numbers directly from the command line:
   - `px0` (opens the [review workbench](workbench.md); `px0 .` opens the current directory)
   - `px0 ~/projects/kernel` (opens specified repository)
@@ -80,9 +80,7 @@ px0 -base-path /rev-123/ -host 0.0.0.0 -port 7777 ~/workspace
 | `-no-open` | `false` | Suppress automatic browser launch (ideal for servers) |
 | `-no-lsp` | `false` | Disable Language Server discovery |
 | `-no-git` | `false` | Disable Git status checks and diff viewing |
-| `-agent H` | none | Pin active coding agent harness for session |
-| `-no-agent` | `false` | Disable coding agent editing features entirely |
-| `-verbose` | `false` | Log every HTTP request, searches, symbols, and agent prompts to terminal |
+| `-verbose` | `false` | Log every HTTP request, searches, and symbols to terminal |
 | `-quiet` | `false` | Suppress CLI narration on stdout |
 | `-update` | `false` | Check for updates and install latest release |
 | `-version` | `false` | Print version and architecture and exit |

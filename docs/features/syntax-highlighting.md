@@ -1,62 +1,29 @@
 # Syntax Highlighting & Language Support
 
-px0 delivers fast, accurate syntax highlighting across roughly 280 programming languages, markup formats, and configuration files. Powered by an optimized Chroma lexing engine and viewport windowing, it renders highlighted code with zero typing lag or scrolling stutters.
+The editor highlights code with Monaco's Monarch tokenizers, the same highlighters VS Code's web editor uses, running in the browser as you type. The colours come from the active px0 theme, so the editor, diffs and Markdown code blocks share one palette.
 
 ---
 
-## Overview & Core Purpose
+## Languages
 
-Reading code is the predominant activity during code reviews, security audits, and agent pairing sessions. Inaccurate or plain-text rendering increases eye strain and makes understanding complex control flow significantly harder. At the same time, traditional client-side syntax highlighters often block the browser main thread or consume hundreds of megabytes of RAM when tokenizing large files.
+px0 bundles Monaco's Monarch highlighters for about 80 languages, including Go, Rust, C/C++, C#, Java, Kotlin, Scala, Swift, Dart, Python, Ruby, PHP, Perl, Lua, Julia, R, Elixir, Clojure, F#, Scheme, JavaScript, TypeScript, HTML, CSS/SCSS/Less, GraphQL, Markdown, YAML, XML, INI, HCL, Protobuf, SQL dialects, Shell, PowerShell, Dockerfile and Solidity.
 
-px0 provides full native syntax highlighting for almost every language in modern use. By utilizing an intelligent viewport windowing strategy, px0 only highlights lines as they scroll near the visible viewport. This enables instant rendering and silky smooth 60fps scrolling whether viewing a 50-line shell script or a 300,000-line generated database migration.
+- **JSON** (`.json`, `.jsonc`, `.json5`, ...) gets a small Monarch highlighter of px0's own, because Monaco's JSON support comes with a language service px0 leaves out.
+- px0 maps a few names Monaco does not know: `Makefile`, `justfile` and dotfiles such as `.bashrc` and `.env` as shell; `go.mod` / `go.work` as Go; `.toml`, `.conf`, `.cfg`, `.editorconfig` as INI; `.tf` as HCL; `.tsx`, `.mjs`, `.cjs`, `.mts`; `.svelte` / `.vue` as HTML; `.gotmpl` / `.tmpl` as Handlebars; `.svg` and `.plist` as XML.
+- Anything else opens as plain text. Click the language in the status bar (**Select Language Mode**) to pick another for the file.
 
----
+Monaco's TypeScript/JavaScript, HTML, CSS and JSON *language services* (their IntelliSense and validation workers) are not bundled: they are megabytes of code and the [language servers](lsp-code-intelligence.md) cover the same ground. Their Monarch highlighters are kept.
 
-## Supported Languages & Formats
+## Editor features that go with it
 
-With built-in support for approximately 280 languages, px0 highlights virtually every language, format, and dialect out of the box with zero plugins required:
+These are Monaco features, controlled by settings (see [Settings](settings-and-configuration.md)):
 
-- **Systems & Backend**: Go, Rust, C, C++, Zig, C#, Java, Kotlin, Swift, Scala, D, Nim, Fortran, Assembly.
-- **Web & Scripting**: TypeScript, JavaScript, Python, Ruby, PHP, Lua, Perl, Shell (Bash/Zsh/Fish), PowerShell.
-- **Functional Languages**: Haskell, OCaml, Elixir, Erlang, Clojure, F#, Common Lisp, Scheme, Racket.
-- **Data & Configuration**: JSON, YAML, TOML, XML, CSV, INI, Dockerfile, Makefile, HCL/Terraform, Protobuf.
-- **Web Templates & Styling**: HTML, CSS, SCSS, Sass, Less, GraphQL, Vue, Svelte, JSX, TSX, Jinja.
-- **Scientific & Hardware**: Julia, R, MATLAB, SQL, Verilog, VHDL, CUDA.
-- **Documentation & Notes**: Markdown, LaTeX, AsciiDoc, ReStructuredText, Diff/Patch.
+- **Bracket pair colorization** and bracket guides (`editor.bracketPairColorization.enabled`).
+- **Occurrence highlighting** of the word under the cursor, and of the selection.
+- **Current line highlight** (`editor.renderLineHighlight`).
+- **Sticky scroll** of the enclosing scopes (`editor.stickyScroll.enabled`).
+- **Whitespace rendering** (`editor.renderWhitespace`), **rulers** (`editor.rulers`), **minimap** (`editor.minimap.enabled`).
 
----
+## Highlighting on the server
 
-## Key Capabilities
-
-- **Viewport Windowing**: Files are tokenized in small viewport-sized chunks on demand. Memory footprint remains virtually flat regardless of file length.
-- **Dual-Tier Highlighting**: Lines entering the viewport receive instantaneous structural tokenization followed by asynchronous lexical refinement, ensuring scrolling never waits on token computation.
-- **Consistent Visual Design**: The same color token classes apply consistently across the code viewer, the side-by-side git diff viewer, and Markdown fenced code blocks.
-- **Bracket Pair Colorization**: Nested parentheses, brackets, and curly braces (`()`, `[]`, `{}`) are color-coded in alternating rainbow hues, making deeply nested closures and argument lists effortless to balance visually.
-- **Word Occurrence Highlighting**: Selecting or placing the caret on an identifier automatically highlights all other occurrences of that symbol in the visible buffer, helping you trace variable usage without manual searching.
-- **Active Line Highlighting**: Subtly highlights the background of the row containing the active cursor position to keep your eyes oriented during reading.
-
----
-
-## Developer Workflows & Practical Value
-
-### Reading Multi-Language Repositories
-Polyglot repositories combining Go services, React/TypeScript frontends, Python analytics scripts, Terraform infrastructure, and Docker configurations render with rich native highlighting instantly without installing language packs or extensions.
-
-### Instant Opening of Massive Files
-Files that would crash or freeze conventional web-based editors (such as huge SQL dumps or multi-megabyte JSON fixtures) open in px0 in milliseconds because only the visible lines are highlighted.
-
----
-
-## Configuration & Tuning
-
-Configure syntax highlighting features in Settings (`Cmd/Ctrl+,`):
-
-- **Editor: Bracket Pair Colorization** (`editor.bracketPairColorization`): Enable or disable rainbow bracket pairing (defaults to `true`).
-- **Editor: Occurrences Highlight** (`editor.occurrencesHighlight`): Automatically highlight matching words across the file (defaults to `true`).
-- **Editor: Render Line Highlight** (`editor.renderLineHighlight`): Choose `"line"` highlight or `"none"`.
-
----
-
-## Technical Architecture Deep Dive
-
-For an explanation of the Chroma lexer integration, LRU token caching, viewport windowing (`hlChunk = 1000`), and panic recovery fallbacks, see [Windowed Syntax Highlighting Internals](../internals/syntax-highlighting.md).
+The server still has its own highlighter, [Chroma](https://github.com/alecthomas/chroma), for ~280 languages. It colours fenced code blocks in the [Markdown preview](markdown-preview.md) and the windowed `/api/file` endpoint. Both use the same theme tokens as the editor. See [Windowed Syntax Highlighting Internals](../internals/syntax-highlighting.md).

@@ -23,7 +23,6 @@ import (
 	"time"
 
 	"px0/internal/settings"
-	"px0/internal/telemetry"
 	"px0/internal/ui"
 	"px0/internal/update"
 )
@@ -32,9 +31,6 @@ import (
 var rawVersion string
 
 var version = strings.TrimSpace(rawVersion)
-
-// posthogKey can be injected at build time: go build -ldflags="-X main.posthogKey=phc_..."
-var posthogKey string
 
 func main() {
 	var (
@@ -49,14 +45,15 @@ func main() {
 		noUpdate     = flag.Bool("no-update", false, "do not auto-update px0 on startup")
 		noColor      = flag.Bool("no-color", false, "disable colour output")
 		quiet        = flag.Bool("quiet", false, "suppress narration")
-		verbose      = flag.Bool("verbose", false, "log startup steps, requests, searches, symbols, and agent prompts to terminal")
-		noTelemetry  = flag.Bool("no-telemetry", false, "disable anonymous usage telemetry")
-		agentCmd     = flag.String("agent", "", "pin the coding harness used for edits (claude, gemini, cursor-agent, agy, opencode, codex, aider, goose, or a command template containing {prompt}); detected and chosen in the UI when omitted")
-		noAgent      = flag.Bool("no-agent", false, "do not offer editing through a coding harness")
+		verbose      = flag.Bool("verbose", false, "log startup steps, requests, searches, and symbols to terminal")
 		_            = flag.Bool("y", false, "answer yes to prompts (deprecated; PRs are always opened without prompt)")
 		_            = flag.Bool("yes", false, "answer yes to prompts (alias for -y)")
 		basePathFlag = flag.String("base-path", "", "base URL path prefix to serve endpoints and assets from (e.g. /rev-123/)")
 		wbChild      = flag.Bool("workbench-child", false, "internal: run as a workspace of the px0 workbench")
+		termFlag     = flag.Bool("terminal", false, "allow the integrated terminal even when listening on a non-loopback address (anyone who can reach px0 can then run commands)")
+		noTermFlag   = flag.Bool("no-terminal", false, "disable the integrated terminal")
+		termHostFlag = flag.String("terminal-host", "", "internal: the address the workbench listens on, for the terminal policy of its workspaces")
+		rootsFlag    = flag.String("roots", "", "workbench only: folders (separated by '"+string(filepath.ListSeparator)+"') whose repositories are listed and which alone may be browsed and opened")
 	)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "px0 %s - a code navigator\n\nusage:\n  px0 [flags]                      open the workbench\n  px0 [flags] <file or directory>\n  px0 [flags] <pr-url>\n\nflags:\n", version)
@@ -97,15 +94,18 @@ func main() {
 		for _, f := range []struct {
 			on   bool
 			flag string
-		}{{*noLSP, "-no-lsp"}, {*noGit, "-no-git"}, {*noAgent, "-no-agent"}, {*noTelemetry, "-no-telemetry"}} {
+		}{{*noLSP, "-no-lsp"}, {*noGit, "-no-git"}, {*termFlag, "-terminal"}, {*noTermFlag, "-no-terminal"}} {
 			if f.on {
 				childArgs = append(childArgs, f.flag)
 			}
 		}
-		if *agentCmd != "" {
-			childArgs = append(childArgs, "-agent", *agentCmd)
+		// Workspaces listen on loopback behind the workbench's proxy; their
+		// terminal policy follows the address the browser actually reaches.
+		childArgs = append(childArgs, "-terminal-host", *host)
+		if on, _ := terminalPolicy(*host, *termFlag, *noTermFlag); on && !isLoopbackHost(*host) {
+			ui.Status("warn", "the integrated terminal is on: anyone who can reach "+*host+" can run commands as you", "", 0, os.Stdout)
 		}
-		runWorkbench(*host, *port, *basePathFlag, !*noOpen, !*noUpdate, childArgs)
+		runWorkbench(*host, *port, *basePathFlag, *rootsFlag, !*noOpen, !*noUpdate, childArgs)
 		return
 	}
 
@@ -182,8 +182,6 @@ func main() {
 	tInit := time.Now()
 	ix := NewIndex(root)
 	lsp := newLSPManager(root, !*noLSP)
-	tel := telemetry.New(posthogKey, version, *noTelemetry)
-	defer tel.Close("normal")
 
 	configuredBasePath := "/"
 	if *basePathFlag != "" {
@@ -193,7 +191,6 @@ func main() {
 	}
 
 	pxSrv := NewServer(ix, lsp, configuredBasePath)
-	pxSrv.tel = tel
 	if *wbChild {
 		pxSrv.workbenchURL = workbenchBaseOf(configuredBasePath)
 	} else if pr != nil {
@@ -206,13 +203,14 @@ func main() {
 	if pr != nil {
 		pxSrv.SetPR(pr)
 	}
-	var agent *agentManager
-	if !*noAgent {
-		agent, err = newAgentManager(root, *agentCmd, lsp)
-		if err != nil {
-			fatal(fmt.Errorf("-agent: %w", err))
-		}
-		pxSrv.SetAgent(agent)
+	termHost := *host
+	if *termHostFlag != "" {
+		termHost = *termHostFlag
+	}
+	termOn, termWhy := terminalPolicy(termHost, *termFlag, *noTermFlag)
+	pxSrv.SetTerminalPolicy(termOn, termWhy)
+	if termOn && !isLoopbackHost(termHost) && !*wbChild {
+		ui.Status("warn", "the integrated terminal is on: anyone who can reach "+termHost+" can run commands as you", "", 0, os.Stdout)
 	}
 	initDur := time.Since(tInit)
 
@@ -281,34 +279,6 @@ func main() {
 		} else if ui.Verbose {
 			ui.Status("ok", "checked language servers (none installed)", ui.FmtDuration(lspDur), 0, os.Stdout)
 		}
-		if agent != nil {
-			tAgent := time.Now()
-			var found []string
-			for _, h := range agent.Detect() {
-				if h.Installed {
-					item := h.Name
-					if h.Model != "" {
-						item = fmt.Sprintf("%s (%s)", h.Name, h.Model)
-					}
-					found = append(found, item)
-				}
-			}
-			agentDur := time.Since(tAgent)
-			if ui.Verbose {
-				if len(found) > 0 {
-					ui.Status("ok", fmt.Sprintf("detected coding harnesses: %s", strings.Join(found, ", ")), ui.FmtDuration(agentDur), 0, os.Stdout)
-				} else {
-					ui.Status("ok", "checked coding harnesses (none found)", ui.FmtDuration(agentDur), 0, os.Stdout)
-				}
-			}
-		}
-
-		tel.Track("session_started", map[string]any{
-			"files_bucket": telemetry.FilesBucket(n),
-			"index_ms":     ms,
-			"has_git":      gitAvailable(root),
-			"has_lsp":      len(lsp.Available()) > 0,
-		})
 	}()
 
 	// Check for updates in the background once the server is already up, so
@@ -352,17 +322,14 @@ func main() {
 		// the responses it is still draining.
 		<-shutDown
 	}
+	pxSrv.CloseTerminals()
 	lsp.Close()
-	agent.Close()
-	pxSrv.CloseThreads()
 	pr.Close()
 
 	if interrupted {
-		tel.Close("interrupted")
 		os.Exit(130)
 	}
 
-	tel.Close("normal")
 	if err != nil && err != http.ErrServerClosed {
 		fatal(err)
 	}
@@ -370,7 +337,7 @@ func main() {
 
 // runWorkbench serves the workbench until interrupted, then stops every
 // workspace it started.
-func runWorkbench(host string, port int, basePathFlag string, open, doAutoUpdate bool, childArgs []string) {
+func runWorkbench(host string, port int, basePathFlag, rootsFlag string, open, doAutoUpdate bool, childArgs []string) {
 	if u := runningWorkbench(); u != "" {
 		ui.Status("ok", "workbench already running", u, 0, os.Stdout)
 		if open {
@@ -389,6 +356,10 @@ func runWorkbench(host string, port int, basePathFlag string, open, doAutoUpdate
 	if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
 		cwd = resolved
 	}
+	roots, err := parseRoots(rootsFlag, cwd)
+	if err != nil {
+		fatal(err)
+	}
 	basePath := "/"
 	if basePathFlag != "" {
 		basePath = cleanBasePath(basePathFlag)
@@ -400,7 +371,7 @@ func runWorkbench(host string, port int, basePathFlag string, open, doAutoUpdate
 	if err != nil {
 		fatal(err)
 	}
-	wb := newWorkbench(basePath, cwd, exe, childArgs)
+	wb := newWorkbench(basePath, cwd, exe, childArgs, roots)
 	srv := &http.Server{Handler: wb}
 
 	u := viewerURL(addr, "", 0, basePath)
@@ -415,8 +386,15 @@ func runWorkbench(host string, port int, basePathFlag string, open, doAutoUpdate
 			ui.KV("network", ui.Accent(networkURL, os.Stdout), 11, os.Stdout)
 		}
 	}
+	for _, r := range roots {
+		ui.KV("root", r, 11, os.Stdout)
+	}
 	if ip := net.ParseIP(host); host != "localhost" && (ip == nil || !ip.IsLoopback()) {
-		ui.Status("warn", "anyone who can reach this address can browse and open any directory on this machine", "", 0, os.Stdout)
+		if len(roots) > 0 {
+			ui.Status("warn", "anyone who can reach this address can browse and open any directory under the roots", "", 0, os.Stdout)
+		} else {
+			ui.Status("warn", "anyone who can reach this address can browse and open any directory on this machine", "", 0, os.Stdout)
+		}
 	}
 	ui.Hint("ctrl-c to stop", os.Stdout)
 	if open {

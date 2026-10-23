@@ -108,7 +108,7 @@ When language servers are disabled or unavailable, px0 provides instantaneous sy
 
 ### Parallel Symbol Flagging
 
-During full-text searches, lines that look like function, class, struct, or type declarations are automatically flagged (`Match.Def = true`). Declaration patterns (`defRegexForExt`) are compiled lazily per language family only when a file produces a match, allowing the frontend to visually highlight definition matches in search results without running a secondary query.
+During full-text searches, lines that look like function, class, struct, or type declarations are automatically flagged (`Match.Def = true`). Declaration patterns (`defRegexForExt`) are compiled lazily per language family only when a file produces a match, so a client can tell definition matches apart without a secondary query (the current Search view does not mark them).
 
 ### Supported Language Grammars
 

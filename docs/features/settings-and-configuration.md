@@ -1,97 +1,84 @@
-# Settings & Configuration System
+# Settings & Configuration
 
-px0 includes a built-in visual Settings manager modeled after VS Code. Accessible via `Cmd/Ctrl+,` or the gear icon in the status bar, it enables complete customization of editor ergonomics, typography, themes, diff views, and coding agents with live real-time synchronization.
-
----
-
-## Overview & Core Purpose
-
-Developer environments are deeply personal: engineers have strong preferences regarding font sizes, line heights, font families, cursor blink styles, tab spacing, and keybindings. However, managing configuration files manually in text editors or dealing with fragmented config directories can be cumbersome. Furthermore, storing settings inside a workspace repository risks polluting Git commits with personal editor preferences.
-
-px0 stores all configuration in a single per-user global file (`~/.px0/settings.json` or `$XDG_CONFIG_HOME/px0/settings.json`), completely isolated from your repository files. The visual Settings editor offers a dual-mode experience: an intuitive graphical form with interactive pill buttons for quick toggling, and a synchronized raw JSON editor with schema validation. Changes apply immediately in real time without refreshing the browser.
+px0 keeps one per-user settings file, `~/.px0/settings.json` (or `$XDG_CONFIG_HOME/px0/settings.json`), outside every repository. Changes apply at once to every open editor, without a reload.
 
 ---
 
-## Key Capabilities
+## Opening settings
 
-- **Dual UI & Raw JSON Modes**: Switch instantly between the graphical form editor and raw JSON mode with a single click. Changes made in either view synchronize bidirectionally in real time.
-- **Interactive Attribute Pills**: Every setting displays metadata badges (category, type, default value) along with interactive pill buttons for quick selection (e.g., `[line]`, `[block]`, `[underline]` for cursor styles; `[true]`, `[false]` for boolean toggles). Clicking any pill applies that value immediately.
-- **Instant Live Preview Without Reload**: Adjusting font sizes, line heights, themes, cursor animations, or diff modes takes effect immediately across all open tabs without requiring a page reload.
-- **One-Click Factory Reset**: Any setting that has been customized displays an amber `Modified` badge and an inline `Reset` button, allowing you to restore default settings individually.
-- **Clean Workspace Separation**: All configuration lives in your user directory. Your repository working trees, `.git` configs, and tracked files remain 100% pristine.
+- **Settings editor**: `Ctrl/Cmd+,`, **File > Settings**, the **Manage** gear at the bottom of the activity bar, or **Preferences: Open Settings (UI)**. It is a searchable form, grouped by category, with a table of contents on the left. Each setting shows its key; a changed setting is marked as modified. Token settings are masked.
+- **settings.json**: **Open Settings (JSON)** in the Settings editor, **Manage > Open Settings (JSON)**, or **Preferences: Open User Settings (JSON)**. It opens in Monaco; `Ctrl/Cmd+S` saves it.
 
----
+## Settings the editor uses
 
-## Key Configurable Settings
+| Key | Default | Values | Effect |
+| :--- | :--- | :--- | :--- |
+| `editor.fontSize` | `14` | 6–32 | Editor font size (px) |
+| `editor.fontFamily` | `""` (VS Code's platform default: Menlo, Consolas or Droid Sans Mono) | CSS font list | Editor font |
+| `editor.fontLigatures` | `false` | boolean | Font ligatures |
+| `editor.lineHeight` | `0` (from the font size) | 0–48 | Line height (px) |
+| `editor.tabSize` | `4` | `2`, `4`, `8` | Tab width |
+| `editor.insertSpaces` | `true` | boolean | Insert spaces when pressing Tab |
+| `editor.detectIndentation` | `true` | boolean | Take tab size and spaces from the file's content |
+| `editor.wordWrap` | `"on"` | `"on"`, `"off"` | Soft wrap (`Alt+Z` toggles it) |
+| `editor.lineNumbers` | `"on"` | `"on"`, `"off"` | Line numbers |
+| `editor.renderWhitespace` | `"selection"` | `none`, `boundary`, `selection`, `all` | Show whitespace |
+| `editor.minimap.enabled` | `true` | boolean | Minimap |
+| `editor.rulers` | `[]` | array of columns | Vertical rulers (settings.json only) |
+| `editor.cursorStyle` | `"line"` | `line`, `block`, `underline` | Cursor shape |
+| `editor.cursorBlinking` | `"smooth"` | `blink`, `smooth`, `solid` | Cursor animation |
+| `editor.renderLineHighlight` | `"line"` | `line`, `none` | Highlight the current line |
+| `editor.scrollBeyondLastLine` | `true` | boolean | Scroll past the end of the file |
+| `editor.smoothScrolling` | `true` | boolean | Animated scrolling (settings.json only) |
+| `editor.mouseWheelZoom` | `false` | boolean | `Ctrl/Cmd`+wheel changes the font size (settings.json only) |
+| `editor.bracketPairColorization.enabled` | `true` | boolean | Colour matching brackets |
+| `editor.stickyScroll.enabled` | `true` | boolean | Keep enclosing scopes at the top while scrolling |
+| `files.autoSave` | `"off"` | `off`, `afterDelay`, `onFocusChange` | Save dirty files automatically |
+| `files.autoSaveDelay` | `1000` | milliseconds | Delay for `afterDelay` |
+| `files.trimTrailingWhitespace` | `false` | boolean | Trim trailing whitespace on save |
+| `files.insertFinalNewline` | `false` | boolean | End the file with a newline on save |
+| `explorer.autoReveal` | `true` | boolean | Reveal the active file in the explorer |
+| `diffEditor.renderSideBySide` | `true` | boolean | Side-by-side (`true`) or inline diffs |
+| `diffEditor.ignoreTrimWhitespace` | `true` | boolean | Ignore leading and trailing whitespace in diffs |
+| `diffEditor.hideUnchangedRegions.enabled` | `false` | boolean | Collapse unchanged regions in diffs |
+| `terminal.integrated.shell`, `.fontSize`, `.fontFamily`, `.fontWeight`, `.fontWeightBold`, `.letterSpacing`, `.lineHeight`, `.cursorStyle`, `.cursorBlinking`, `.scrollback`, `.minimumContrastRatio`, `.gpuAcceleration`, `.shellIntegration.enabled`, `.shellIntegration.decorationsEnabled`, `.copyOnSelection`, `.altClickMovesCursor`, `.sendKeybindingsToShell`, `.enableBell` | see [Integrated Terminal](terminal.md#settings) | | The integrated terminal |
+| `workbench.colorTheme` | `"vscode-dark-2026"` | a theme ID | Color theme (see [Themes](themes-and-styling.md)) |
 
-| Setting Key | Category | Default | Allowed Values / Range | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `editor.fontSize` | Text Editor | `13.5` | `9.0` – `32.0` (px) | Font size in the code viewer |
-| `editor.fontFamily` | Text Editor | JetBrains Mono stack | CSS font stack string | Font family stack for viewer |
-| `editor.lineHeight` | Text Editor | `21.0` | `14.0` – `48.0` (px) | Line height for viewer rows |
-| `editor.tabSize` | Text Editor | `4` | `2`, `4`, `8` | Number of spaces per tab |
-| `editor.wordWrap` | Text Editor | `"on"` | `"on"`, `"off"` | Soft line wrapping at editor boundary (also applies to the edit view) |
-| `editor.lineNumbers` | Text Editor | `"on"` | `"on"`, `"off"` | Line numbers display in gutter |
-| `editor.cursorStyle` | Text Editor | `"line"` | `"line"`, `"block"`, `"underline"` | Cursor rendering style |
-| `editor.cursorBlinking` | Text Editor | `"smooth"` | `"blink"`, `"smooth"`, `"solid"` | Cursor blinking animation style |
-| `editor.renderLineHighlight` | Text Editor | `"line"` | `"line"`, `"none"` | Highlight style for the active line |
-| `editor.occurrencesHighlight` | Text Editor | `true` | `true`, `false` | Highlight matches of selected identifier |
-| `editor.scrollBeyondLastLine` | Text Editor | `true` | `true`, `false` | Enable scrolling beyond document end |
-| `editor.bracketPairColorization` | Text Editor | `true` | `true`, `false` | Rainbow bracket pairs & matching |
-| `editor.vimMode` | Text Editor | `false` | `true`, `false` | Modal Vim navigation keybindings |
-| `workbench.colorTheme` | Workbench | `"catppuccin-mocha"` | 14 built-in theme IDs | Active color theme |
-| `markdown.preview.open` | Workbench | `true` | `true`, `false` | Open Markdown files in rendered preview |
-| `table.preview.open` | Workbench | `true` | `true`, `false` | Open CSV and TSV files as a table |
-| `diffEditor.renderSideBySide` | Diff Editor | `true` | `true`, `false` | Split vs. unified diff view default |
-| `diffEditor.ignoreTrimWhitespace` | Diff Editor | `true` | `true`, `false` | Ignore whitespace differences in diffs |
-| `git.gutterIndicators` | Git | `true` | `true`, `false` | Visual change markers in gutter |
-| `git.commitMessageInstruction` | Git & Diff | `""` | any string (multi-line textarea) | Extra instructions given to the coding harness when the git panel's **Commit with AI** writes a commit message |
-| `explorer.compactFolders` | Explorer | `true` | `true`, `false` | Compact single-child directory chains |
-| `explorer.autoReveal` | Explorer | `true` | `true`, `false` | Auto-scroll to active file in tree |
-| `files.exclude` | Files | Default globs | Array of glob patterns | Exclude patterns from trees and searches |
-| `search.smartCase` | Search | `true` | `true`, `false` | Case-insensitive unless query has uppercase |
-| `search.maxResults` | Search | `1000` | `50` – `10,000` | Maximum search results returned |
-| `lsp.enabled` | LSP | `true` | `true`, `false` | Master toggle for Language Servers |
-| `lsp.hover.enabled` | LSP | `true` | `true`, `false` | Hover documentation cards |
-| `agent.harness` | Coding Agent | `""` | `claude`, `gemini`, `agy`, etc. | Preferred CLI coding harness |
-| `agent.timeoutSeconds` | Coding Agent | `120` | `10` – `600` (seconds) | Max runtime for agent edits |
-| `github.token` | GitHub | `""` | any string | Personal access token for GitHub pull request review; takes precedence over `GITHUB_TOKEN` and `gh auth token`. Masked in the Settings UI. |
-| `gitlab.token` | GitLab | `""` | any string | Personal access token (`api` scope) for GitLab merge request review. Sent only to `gitlab.host`; takes precedence over `GITLAB_TOKEN`. Masked in the Settings UI. |
-| `gitlab.host` | GitLab | `""` | host name | The instance `gitlab.token` belongs to. Falls back to `GITLAB_HOST`, then `gitlab.com`. Set automatically when you connect through the Connect dialog. |
-| `gitea.token` | Gitea | `""` | any string | Access token for Gitea, Forgejo or Codeberg pull request review. Sent only to `gitea.host`; takes precedence over `GITEA_TOKEN`. Masked in the Settings UI. |
-| `gitea.host` | Gitea | `""` | host name | The instance `gitea.token` belongs to. Falls back to `GITEA_HOST`, then `codeberg.org`. Set automatically when you connect through the Connect dialog. |
-| `bitbucket.token` | Bitbucket | `""` | any string | Bitbucket Cloud access token, or an Atlassian API token together with `bitbucket.email`. Takes precedence over `BITBUCKET_TOKEN`. Masked in the Settings UI. |
-| `bitbucket.email` | Bitbucket | `""` | email | The Atlassian account email of an API token; empty for an access token. Falls back to `BITBUCKET_EMAIL`. |
-| `server.basePath` | Server | `"/"` | any path prefix (e.g. `"/rev-123/"`) | Base URL path prefix to serve endpoints and assets from. Overridden by the `-base-path` CLI flag. |
+The `editor.*` and `diffEditor.*` keys are passed to Monaco as its options of the same name.
 
----
+**File > Auto Save** toggles `files.autoSave` between `off` and `afterDelay`. The checkmark also appears when `onFocusChange` is selected in Settings. Both controls update the same persistent preference. `afterDelay` waits for the last edit in each file; `onFocusChange` saves when leaving an editor, switching editors, or leaving the window. Changing the delay reschedules pending saves; disabling Auto Save cancels them. A request already sent to the server can still finish.
 
-## Accessing Settings
+## Forge tokens and server
 
-- **Keyboard Shortcut**: Press **`Cmd+,`** (macOS) or **`Ctrl+,`** (Linux/Windows).
-- **Status Bar**: Click the **⚙️ Settings** icon in the bottom-right corner.
-- **Command Palette**: Press `Cmd/Ctrl+Shift+P` and choose:
-  - `Preferences: Open Settings (UI)`
-  - `Preferences: Open Settings (JSON)`
+| Key | Effect |
+| :--- | :--- |
+| `github.token` | GitHub token for pull request review; takes precedence over `GITHUB_TOKEN` and `gh auth token`. |
+| `gitlab.token`, `gitlab.host` | GitLab token (`api` scope) and the instance it belongs to (falls back to `GITLAB_HOST`, then gitlab.com). The token is sent only to that host. |
+| `gitea.token`, `gitea.host` | Gitea / Forgejo / Codeberg token and its instance (falls back to `GITEA_HOST`, then codeberg.org). |
+| `bitbucket.token`, `bitbucket.email` | Bitbucket Cloud access token, or an Atlassian API token with its account email. |
+| `server.basePath` | URL path prefix to serve px0 under (e.g. `"/rev-123/"`); the `-base-path` flag overrides it. |
 
----
+The forge host settings are filled in automatically when you connect a token from a pull request review. See [Getting Started with PR Review](pr-review-getting-started.md#2-connect-your-forge).
 
-## Direct JSON File Configuration
+## Settings listed but not used by the current editor
 
-For automated machine setup, dotfile repositories, or scripting, you can directly edit the JSON configuration file:
+The server's schema still lists a few settings from px0's earlier editor. They are saved if you change them but have no effect: `markdown.preview.open`, `table.preview.open`, `editor.occurrencesHighlight`, `editor.bracketPairColorization` (use `editor.bracketPairColorization.enabled`), `explorer.compactFolders`, `files.exclude`, `search.smartCase`, `search.maxResults`, `git.gutterIndicators`, `lsp.enabled` and `lsp.hover.enabled`. To run without language servers or git, use the `-no-lsp` and `-no-git` flags.
+
+## Example
 
 ```json
 {
   "editor.fontSize": 14,
   "editor.fontFamily": "\"JetBrains Mono\", monospace",
-  "editor.lineHeight": 22,
-  "workbench.colorTheme": "tokyo-night",
-  "diffEditor.renderSideBySide": true,
-  "agent.harness": "claude",
-  "agent.timeoutSeconds": 180
+  "editor.wordWrap": "off",
+  "editor.rulers": [100],
+  "files.autoSave": "afterDelay",
+  "files.trimTrailingWhitespace": true,
+  "workbench.colorTheme": "dark",
+  "diffEditor.renderSideBySide": true
 }
 ```
 
-The file is stored at:
-- `~/.px0/settings.json`
-- Or `$XDG_CONFIG_HOME/px0/settings.json` (if `XDG_CONFIG_HOME` is set).
+## What else px0 remembers
+
+Per browser, not in settings.json: the layout (side bar and panel size and visibility, the last view), open tabs per workspace, expanded folders, Search toggles, the draft commit message, recent files and commands, and the last theme.

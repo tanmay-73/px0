@@ -17,17 +17,16 @@ This document outlines the testing architecture, benchmark methodology, coverage
 
 ## 2. Package & Subsystem Coverage Breakdown
 
-All 11 packages in `px0` achieve **100% Package Test and Benchmark Coverage**:
+All 10 packages in `px0` achieve **100% Package Test and Benchmark Coverage**:
 
 | Package | Statement Coverage | Test Files | Primary Focus & Capabilities Tested |
 | :--- | :--- | :--- | :--- |
-| **`px0` (root core)** | **>62%** (54% short) | 7 test files | HTTP server routing, Git porcelain/diff parsing, LSP client, multi-repo workbench, forge providers (GitHub, GitLab, Gitea, Bitbucket), chat threads, AI agent harnesses. |
+| **`px0` (root core)** | **>62%** (54% short) | 5 test files | HTTP server routing, file and git write endpoints, Git porcelain/diff parsing, LSP client, multi-repo workbench, forge providers (GitHub, GitLab, Gitea, Bitbucket). |
 | **`internal/fuzzy`** | **100.0%** | `fuzzy_test.go` | Two-pass bounded fuzzy path finder, score calculation, min-heap top-K pruning (`worseResult`, `siftDownResult`), boundary detection. |
 | **`internal/symbols`**| **100.0%** | `symbols_test.go`| Multi-language outline parser (Go, Python, JS/TS, Rust, C/C++, Java, Ruby, Shell, PHP, Lua, Zig, Elixir, Markdown), symbol regex trees, indent calculation. |
 | **`internal/table`**  | **100.0%** | `table_test.go`  | CSV/TSV table rendering, ragged rows, quoted cell line wrapping, delimiter sniffing (`SniffDelim`). |
 | **`internal/render`** | **80.9%** | `render_test.go` | Chroma syntax highlighting, windowed viewport lexing, unified diff coloration, GitHub-Flavored Markdown transformation. |
 | **`internal/ignore`** | **98.4%** | `ignore_test.go` | Gitignore pattern compilation, fast-path segment shortcuts matching regex references, directory-only rule filtering. |
-| **`internal/telemetry`** | **87.4%** | `telemetry_test.go` | PostHog telemetry event dispatch, session lifecycle, anonymous device ID management, file bucket categorization. |
 | **`internal/settings`**| **67.0%** | `settings_test.go`| Persistent settings schema, atomic file saving, deep map merging, raw JSON round-trip validation. |
 | **`internal/ui`**     | **66.9%** | `ui_test.go`      | ANSI color painting, TTY detection, spinner animation, status headers, byte/duration formatting helpers. |
 | **`internal/metrics`**| **63.4%** | `metrics_test.go` | Process resident set size (RSS), peak memory tracking, CPU usage sampling across platforms. |
@@ -58,7 +57,6 @@ Several core algorithms are tested to guarantee zero heap allocations (`0 B/op`,
 - `BenchmarkIgnoreSetMatch`: Path filtering through compiled ignore trees.
 - `BenchmarkFamilyFor`: Extension-to-language family mapping.
 - `BenchmarkPaint`: Terminal styling when outputting ANSI color sequences.
-- `BenchmarkFilesBucket`: Telemetry path count categorization.
 
 ---
 
@@ -70,7 +68,7 @@ Several core algorithms are tested to guarantee zero heap allocations (`0 B/op`,
 
 | Flag | Description | Typical Use Case |
 | :--- | :--- | :--- |
-| `(none)` or `--all` | Runs full test suite and all micro-benchmarks across all 11 packages | Pre-release and CI validation |
+| `(none)` or `--all` | Runs full test suite and all micro-benchmarks across all 10 packages | Pre-release and CI validation |
 | `--fast` | Runs unit tests with `-short` and benchmarks with `-benchtime=100ms` | Fast inner-loop verification (~15s) |
 | `--test` | Runs tests and computes statement coverage only (skips benchmarks) | Unit testing & coverage inspection |
 | `--bench` | Runs micro-benchmarks only across all packages | Performance tuning & profiling |
@@ -128,7 +126,17 @@ When `--json <file>` (or `--json -`) is supplied, the runner produces structured
 
 ---
 
-## 5. End-to-End Macroscopic Benchmarks
+## 5. Frontend Checks
+
+The browser code in `web/src/` has its own fast check, [`scripts/check-web.js`](../../scripts/check-web.js), run by `make web-check` or `npm run check` (and as the first step of `make check`):
+
+1. Every `.js` file under `web/src/`, recursively (including `web/src/workbench/` and the generated `web/src/gen/monaco.js`), is syntax-checked with `node --check`.
+2. Every relative `import` / `from` is resolved on disk, so a renamed or deleted module fails the check instead of the bundle.
+3. `bun test web/src/` runs the frontend unit tests, `web/src/*.test.js` (`linediff.test.js`: the Myers line diff behind the gutter quick diff; `quickinput.test.js`: fuzzy matching and highlighting for Quick Open and the pickers). They test pure functions and need no browser.
+
+Bundling (`make web`, `node scripts/build-web.js`) needs [Bun](https://bun.sh); so does the test step of the check. The Go tests do not need either, as long as `web/dist/` exists for `go:embed`. UI behaviour beyond these unit tests (Monaco, the views, the sanitizer, Mermaid) has no automated test in the repository.
+
+## 6. End-to-End Macroscopic Benchmarks
 
 In addition to in-process micro-benchmarks, macroscopic performance is benchmarked against real-world repositories via [`benchmark.sh`](../../benchmark.sh).
 

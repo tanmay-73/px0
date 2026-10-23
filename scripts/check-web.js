@@ -14,7 +14,8 @@ const rootDir = path.resolve(__dirname, '..');
 const srcDir = path.join(rootDir, 'web', 'src');
 
 console.log('[check-web] Validating frontend modules...');
-const files = fs.readdirSync(srcDir).filter(f => f.endsWith('.js'));
+// Every module, including the workbench page's and the generated Monaco list.
+const files = fs.readdirSync(srcDir, { recursive: true }).filter(f => f.endsWith('.js'));
 let hasError = false;
 
 for (const file of files) {
@@ -31,7 +32,7 @@ for (const file of files) {
   let match;
   while ((match = importRegex.exec(content)) !== null) {
     const relTarget = match[1];
-    const resolved = path.resolve(srcDir, relTarget.endsWith('.js') ? relTarget : relTarget + '.js');
+    const resolved = path.resolve(path.dirname(filePath), /\.(js|css)$/.test(relTarget) ? relTarget : relTarget + '.js');
     if (!fs.existsSync(resolved)) {
       console.error(`[check-web] Broken import in ${file}: cannot resolve "${relTarget}"`);
       hasError = true;
@@ -40,23 +41,11 @@ for (const file of files) {
 }
 
 try {
-  execFileSync('bun', ['test', 'web/src/'], { cwd: rootDir, stdio: 'inherit' });
+  execFileSync(process.env.BUN || 'bun', ['test', 'web/src/'], { cwd: rootDir, stdio: 'inherit' });
 } catch (err) {
   // If bun test fails, propagate error
   if (err.status !== 0) {
     hasError = true;
-  }
-}
-
-for (const bundle of ['web/app.js', 'web/workbench.js']) {
-  const bundlePath = path.join(rootDir, bundle);
-  if (fs.existsSync(bundlePath)) {
-    try {
-      execFileSync('node', ['--check', bundlePath], { stdio: 'pipe' });
-    } catch (err) {
-      console.error(`[check-web] Syntax error in ${bundle}:`, err.stderr?.toString() || err.message);
-      hasError = true;
-    }
   }
 }
 

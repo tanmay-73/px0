@@ -104,12 +104,6 @@ func TestUIOutputFunctions(t *testing.T) {
 		Verbose = false
 	}()
 
-	VerbosePrompt(1, "test-harness", "Line 1\nLine 2\n", &buf)
-	if !strings.Contains(buf.String(), "Line 1") {
-		t.Errorf("VerbosePrompt missing line: %s", buf.String())
-	}
-
-	buf.Reset()
 	Status("ok", "Operation completed", "in 12ms", 20, &buf)
 	if !strings.Contains(buf.String(), "Operation completed") {
 		t.Errorf("Status missing msg: %s", buf.String())
@@ -170,4 +164,3 @@ func BenchmarkPaint(b *testing.B) {
 		_ = Paint("Sample Text", ColorAccent, true, &buf)
 	}
 }
-

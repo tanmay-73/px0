@@ -1,70 +1,41 @@
-# Themes & Visual Customization
+# Themes
 
-px0 comes pre-packaged with 14 polished color themes spanning popular dark, low-contrast, and light aesthetics. Backed by a strict CSS custom property token architecture, themes provide consistent contrast and visual harmony across code, diff views, Markdown previews, and modals.
-
----
-
-## Overview & Core Purpose
-
-Visual comfort and ergonomic contrast are essential for developers spending long hours auditing code and reviewing diffs. Lighting conditions change throughout the day, and different engineers prefer different palettes—from deep midnight contrast to muted pastel tones or crisp daylight schemes.
-
-px0 provides instant theme switching with zero browser reloading. Themes are implemented using pure CSS custom variables (`var(--bg)`, `var(--fg)`, `var(--accent)`), ensuring that changing a theme updates every element—editor rows, file trees, diff panels, markdown headers, and status badges—cohesively and instantaneously.
+px0 ships 18 color themes. A theme colours the whole workbench (side bar, tabs, panels, status bar, Markdown preview) and the Monaco editor, including syntax highlighting and diffs, from one set of CSS tokens.
 
 ---
 
-## Built-In Themes
+## Built-in themes
 
-px0 ships with 14 curated themes ready for immediate use:
-
-| Theme Name | Identifier | Aesthetic & Style |
+| Theme | ID | Scheme |
 | :--- | :--- | :--- |
-| **Catppuccin Mocha** | `catppuccin-mocha` | Soothing, low-contrast dark pastel palette (Default) |
-| **Catppuccin Latte** | `catppuccin-latte` | Warm, low-contrast light pastel palette |
-| **GitHub Dark** | `github-dark` | Classic GitHub Dark theme |
-| **Tokyo Night** | `tokyo-night` | Celebrated deep blue and neon palette |
-| **Dracula** | `dracula` | Vibrant purple and pink dark theme |
-| **Gruvbox Dark** | `gruvbox-dark` | Retro groove warm dark palette |
-| **Gruvbox Light** | `gruvbox-light` | Retro groove warm parchment light palette |
-| **Nord** | `nord` | Arctic, north-bluish clean palette |
-| **Solarized Dark** | `solarized-dark` | Low-contrast teal and yellow solarized palette |
-| **Solarized Light** | `solarized-light` | Warm paper solarized light palette |
-| **Monokai** | `monokai` | Iconic high-contrast vibrant dark palette |
-| **One Dark** | `one-dark` | Atom / VS Code classic dark palette |
-| **Rose Pine** | `rose-pine` | Atmospheric dark rose and muted tones |
-| **Light Default** | `light` | Crisp, high-contrast daylight theme |
+| **Catppuccin Mocha** | `catppuccin-mocha` | dark |
+| **Catppuccin Latte** | `catppuccin-latte` | light |
+| **Dark 2026** (default) | `vscode-dark-2026` | dark |
+| **Light 2026** | `vscode-light-2026` | light |
+| **Dark Modern** | `vscode-dark` | dark |
+| **Light Modern** | `vscode-light` | light |
+| **Dracula** | `dracula` | dark |
+| **GitHub Dark** | `github-dark` | dark |
+| **Gruvbox Dark** | `gruvbox-dark` | dark |
+| **Gruvbox Light** | `gruvbox-light` | light |
+| **Monokai** | `monokai` | dark |
+| **Nord** | `nord` | dark |
+| **One Dark** | `one-dark` | dark |
+| **Paper** | `light` | light |
+| **Rose Pine** | `rose-pine` | dark |
+| **Solarized Dark** | `solarized-dark` | dark |
+| **Solarized Light** | `solarized-light` | light |
+| **Tokyo Night** | `dark` | dark |
 
----
+## Switching themes
 
-## Key Capabilities
+- **Preferences: Color Theme** (`Ctrl/Cmd+K Ctrl/Cmd+T`), **File > Color Theme** (in the application menu) or **Manage > Themes > Color Theme** opens a picker grouped into dark and light themes. Moving through the list previews each theme; `Enter` keeps it, `Esc` restores the one you had.
+- Or set `workbench.colorTheme` in Settings (`Ctrl/Cmd+,`) or settings.json.
 
-- **Instant Live Switching**: Changing your theme in Settings or the Command Palette applies immediately across all tabs and panels without reloading the page.
-- **Universal Token Coverage**: Themes govern all UI subsystems uniformly:
-  - Source code syntax tokens (keywords, strings, types, functions, comments).
-  - Git diff backgrounds and line gutters (added, deleted, modified).
-  - Markdown article elements, blockquotes, and alert badges.
-  - Search highlighting, minimap ticks, and selection overlays.
-- **High-Contrast Readability**: Every theme is tuned to maintain high text-to-background contrast ratios, preventing eye fatigue during extended inspection sessions.
-- **Dynamic Server Aggregation**: Themes are served as a single lightweight stylesheet (`/static/themes.css`) with zero runtime overhead.
+The choice is saved to settings.json, so the [workbench](workbench.md) page and every workspace use it, and also remembered in the browser. The workbench page has its own theme button in its title bar.
 
----
+## Custom themes
 
-## Developer Workflows & Switching Themes
+A theme is one CSS file in `web/themes/` that sets px0's colour tokens; adding a file adds a theme, with no list to update. See [Theme Architecture & CSS Tokens](../internals/styling-and-themes.md) for the token reference and how px0 turns a theme into a Monaco theme.
 
-### Quick Theme Switching via Command Palette
-1. Press **`Cmd/Ctrl+Shift+P`** to open the Command Palette.
-2. Type `Preferences: Color Theme` (or `theme`) and press `Enter`.
-3. Use the arrow keys to preview themes dynamically in real time.
-4. Press `Enter` to confirm your selection.
-
-### Configuring via Settings UI
-1. Press **`Cmd/Ctrl+,`** to open Settings.
-2. Navigate to **Workbench: Color Theme** (`workbench.colorTheme`).
-3. Select your preferred theme from the dropdown or click one of the interactive theme pill buttons.
-
-Your choice is saved in `~/.px0/settings.json` and remembered across all future sessions.
-
----
-
-## Technical Architecture Deep Dive
-
-For the complete CSS custom property token dictionary, naming conventions, and instructions on creating custom themes, see [Theme Architecture & CSS Tokens Internals](../internals/styling-and-themes.md).
+Dark 2026 and Light 2026 are VS Code's default themes (as of VS Code 1.142); they and the Modern themes use VS Code's own editor and workbench colours, measured from the running VS Code. Saved theme choices are preserved. Every theme shares VS Code's modern layout: the activity bar, side bar, editor and panel float as rounded cards on the window background, the active editor tab joins the editor below it, and view titles are in sentence case. File icons use the bundled Seti font. The title bar's Back, Forward and layout buttons run the same commands available in the menus and keyboard shortcuts.

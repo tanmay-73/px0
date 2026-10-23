@@ -12,7 +12,34 @@ Running `px0` with no arguments opens the **workbench**: one page for opening an
 - **Open \<cwd\>** opens the directory px0 was started in, which is what a bare `px0` did before the workbench.
 - **Recent** lists every directory and pull request opened before, most recent first, including ones opened directly with `px0 <dir>` or `px0 <pr-url>`. Click a row to reopen it; Cmd/Ctrl-click opens it in a new tab.
 
-Each workspace opens at its own address, `/w/<id>/`, on the workbench's port. The address is stable, so a bookmarked or reloaded review simply reopens. The ▦ button in the explorer header leads back to the workbench.
+Each workspace opens at its own address, `/w/<id>/`, on the workbench's port. The address is stable, so a bookmarked or reloaded review simply reopens. In a workspace, the px0 logo at the left of the title bar, **File > Open Workbench**, and the home button of the Repositories view lead back to the workbench.
+
+## Repositories
+
+The **Repositories** panel lists every git repository px0 finds on the machine: under the `-roots` folders when given, otherwise under the folder px0 was started in, the folder above it, the usual code folders in your home directory and the folders around your recent ones. The search goes a few levels deep and stops at each repository it finds, so nested folders of a repository are never listed as repositories of their own. **Rescan** looks again; otherwise the list is kept for a minute.
+
+Each row shows the repository's current branch and what is pending in it, read with `git status` as the row scrolls into view, without taking git's index lock:
+
+| Mark | Meaning |
+| :--- | :--- |
+| `●3` | 3 tracked files changed |
+| `✚2` | 2 files staged |
+| `?1` | 1 untracked file |
+| `⚠1` | 1 file with merge conflicts |
+| `↑2` / `↓1` | commits to push to / pull from the upstream branch |
+| `clean` | nothing pending |
+
+Type in the filter box to narrow the list by name or path (every word must match), **↑/↓** to choose, **Enter** to open. Click a row or **Open** to open it in this tab; **Ctrl/Cmd-click**, a middle click, the **↗** button or **Ctrl/Cmd+Enter** opens it in a new tab. The **Open** buttons in Browse take Ctrl/Cmd-click the same way.
+
+## Switching repositories from a workspace
+
+A workspace opened from the workbench can move to any other repository without going back to the workbench page:
+
+- **`Alt+O`**, a click on the workspace name at the left of the status bar, **File > Switch Repository...**, or **Workspace: Switch Repository...** in the Command Palette lists what was opened before (the current one marked `current`, running ones `running`) followed by every repository in the Repositories panel. Type to filter. **Enter** opens it in this tab, **Ctrl/Cmd+Enter** or Ctrl/Cmd-click in a new tab. A path (`/…`, `~/…`) or a PR URL typed there opens as typed.
+- The **Repositories** view in the activity bar lists the same entries, recently opened first, with each repository's branch and pending changes. Type to filter; click to open here, `Ctrl/Cmd`-click or middle-click for a new tab; right-click for Open, Open in New Tab and Copy Path. Its title bar has **Rescan for Repositories** and **Open Workbench**.
+- In the file tree, a folder that is a git repository of its own (a nested clone or a submodule) carries a `git` tag. Its right-click menu has **Open Repository** and **Open Repository in New Tab**, which open it as a workspace with its own Source Control view.
+
+Each workspace keeps its own tabs, index and git state, so going back to one (with the browser's Back button, or by switching again) finds it as you left it as long as it is still running.
 
 ## Managing the list
 
@@ -20,11 +47,11 @@ Hover a row for its actions:
 
 | Action | Effect |
 | :--- | :--- |
-| ☆ / ★ | Pin to the top of the list, or unpin. Pinned entries are never dropped. |
-| ■ | Stop the running workspace and free its memory. Opening it again restarts it. |
-| ✕ | Stop it and remove it from the list. |
+| **Pin to top** / **Unpin** | Pin to the top of the list, or unpin. Pinned entries are never dropped. |
+| **Stop this workspace** | Stop the running workspace and free its memory. Opening it again restarts it. |
+| **Remove from the list** | Stop it and remove it from the list. |
 
-A status dot shows workspaces that are **running**, **starting**, or **failed** (hover for the error). Up to 50 unpinned entries are kept.
+A label shows workspaces that are **running**, **starting**, **failed** (hover for the error) or **exited**. Up to 50 unpinned entries are kept.
 
 ---
 
@@ -38,11 +65,12 @@ A status dot shows workspaces that are **running**, **starting**, or **failed** 
 | `Enter` | Path Input / Suggestion | Open the entered folder, PR URL, or highlighted suggestion |
 | `Esc` | Path Suggestions / Theme | Dismiss folder suggestions or restore previous theme |
 | `Cmd/Ctrl + Click` | Recent Workspaces | Open workspace in a new browser tab |
-| `☆` / `★` | Workspace Row | Pin workspace to the top of the list, or unpin |
-| `■` | Workspace Row | Stop running workspace child process and free RAM |
-| `✕` | Workspace Row | Stop workspace and remove from list |
-| `▦` | Workspace Header | Return to the Review Workbench from any open workspace |
-| `Palette button` / `Arrow keys` | Status Bar | Preview and select workbench color theme |
+| `Cmd/Ctrl + Click`, `↗`, middle click | Repositories | Open the repository in a new browser tab |
+| `Cmd/Ctrl + Enter` | Repositories Filter | Open the highlighted repository in a new browser tab |
+| `Alt + O` | Any Workspace | Switch repository (Enter: this tab, Cmd/Ctrl+Enter: new tab) |
+| Pin / Stop / Remove buttons | Recent row | Pin or unpin; stop the workspace; remove it from the list |
+| px0 logo | Workspace title bar | Return to the workbench from any open workspace |
+| Color Theme button / arrow keys | Workbench title bar | Preview and select the color theme |
 
 ## Pull requests
 
@@ -64,13 +92,17 @@ If a pull request cannot be opened (a typo in the URL, no access), the page expl
 
 ## Status bar and themes
 
-The bottom bar matches the app's: logo and version, the number of running workspaces, and the **CPU · RAM · LSP** chip. Here the chip shows the workbench and every running workspace added together; click it for a breakdown by process. The palette button opens the theme list. Arrow keys preview a theme, Enter or a click keeps it, and Esc restores the one you had. The choice is saved to settings, so the workspaces use it too.
+The bottom bar shows px0's version, the number of running workspaces, and CPU and memory: here the workbench and every running workspace added together, with language servers; hover it for a breakdown by process. The **Color Theme** button in the title bar opens the theme list. Arrow keys preview a theme, Enter or a click keeps it, and Esc restores the one you had. The choice is saved to settings, so the workspaces use it too.
 
 ## Resources
 
 Every workspace runs as its own px0 process with its own index and language servers. A workspace that has had no open tab for 30 minutes is stopped to free its memory; it restarts the next time it is opened. Stopping the workbench (Ctrl-C) stops every workspace and removes their PR checkouts.
 
 Running `px0` again while a workbench is already running opens the existing one instead of starting a second.
+
+## Limiting what can be opened (`-roots`)
+
+`px0 -roots <dir>[:<dir>…]` (folders separated as in `PATH`) confines the workbench to those folders: the Repositories panel lists only repositories inside them, and browsing, folder completion and opening refuse everything else. Browse can still walk through the folders above a root, showing only the way down to it. Entries recorded before the roots were narrowed fail to open with a message saying why. PR checkouts that px0 makes itself (under `~/.px0/repos`) are not affected.
 
 ## Security
 
@@ -82,4 +114,4 @@ What you opened, and which clone each repository's PRs use, is saved in `$XDG_ST
 
 ## Flags
 
-The workbench passes `-no-lsp`, `-no-git`, `-no-agent`, `-no-telemetry` and `-agent` on to every workspace it opens. `-host`, `-port`, `-base-path` and `-no-open` apply to the workbench itself. To open the current directory directly, as before, run `px0 .`.
+`-roots` is described above. The workbench passes `-no-lsp` and `-no-git` on to every workspace it opens. `-host`, `-port`, `-base-path` and `-no-open` apply to the workbench itself. To open the current directory directly, as before, run `px0 .`.

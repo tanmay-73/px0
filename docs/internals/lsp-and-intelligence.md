@@ -1,6 +1,6 @@
 # Language Server Protocol (LSP) Architecture & Intelligence
 
-This document details the architecture, lifecycle management, and security boundaries of px0's Language Server Protocol subsystem ([`lsp.go`](../../lsp.go) and [`server.go`](../../server.go)).
+This document details the architecture, lifecycle management, and security boundaries of px0's Language Server Protocol subsystem ([`lsp.go`](../../lsp.go) and [`server.go`](../../server.go)), and how the Monaco editor uses it ([`web/src/lsp.js`](../../web/src/lsp.js), §8).
 
 ## 1. Zero-Cost Lazy Architecture
 
@@ -91,23 +91,22 @@ sequenceDiagram
 ```
 
 - Target paths returned by the server are normalized and admitted into `extAllowed`.
-- External files can be opened and inspected, but cannot be enumerated, searched, listed in the sidebar explorer tree, or edited with an agent.
+- External files can be opened and inspected, but cannot be enumerated, searched, listed in the sidebar explorer tree, or saved (`/api/file/save` resolves through `safePath`, which has no external exception).
 
 ## 5. Stateless Call Hierarchy Trails ([`lsp.go`](../../lsp.go))
 
-px0 provides full incoming and outgoing call hierarchy navigation (`Calls` tab in the right inspector) without holding complex graph state in server memory.
+`/api/lsp/calls` serves incoming and outgoing call hierarchy without holding graph state in server memory. The current Monaco frontend has no call hierarchy view and does not call it.
 
 ### Opaque Item Round-Tripping
 
 - The LSP specification identifies call hierarchy items with an implementation-specific `CallHierarchyItem` object.
-- When expanding a function, the server sends this JSON object to the client browser.
-- When the user clicks to expand a caller or callee, the browser sends the exact `CallHierarchyItem` back to `/api/lsp/calls`.
-- Zero Server State: px0 maintains no in-memory graph trees; cost scales strictly with the nodes the user expands.
-- Client-Side Cycle Detection: Recursive call loops are detected in JavaScript by checking ancestor node identifiers in the tree path.
+- When expanding a function, the server sends this JSON object to the client.
+- To expand a caller or callee, the client sends the exact `CallHierarchyItem` back to `/api/lsp/calls`.
+- Zero Server State: px0 maintains no in-memory graph trees; cost scales strictly with the nodes a client expands. Detecting recursive loops is left to the client.
 
 ## 6. In-App Setup & One-Click Installers
 
-When reading a codebase without an installed language server, the status bar displays `LSP: set up`. Clicking it opens the interactive setup panel (`web/src/lspsetup.js`).
+`/api/lsp/setup` reports, for a file's language, whether a server is installed and the install recipes for the host OS; `/api/lsp/install` runs one, and `/api/lsp/start`, `/api/lsp/stop` and `/api/lsp/servers` manage running servers. The current Monaco frontend has no setup panel: it shows the server's state in the status bar, and a server installed by hand is picked up the next time a file of its language is opened.
 
 ### Security Validation (DNS-Rebinding Defense)
 
@@ -120,5 +119,21 @@ Executing installation commands (e.g., `go install` or `npm install`) requires r
 
 ## 7. Diagnostics (`textDocument/publishDiagnostics`) & Idle Server Reaping
 
-- **Diagnostics**: `lspClient` advertises `publishDiagnostics: {}` during `initialize` and parses incoming `textDocument/publishDiagnostics` notifications into per-file `LSPDiagnostic` slices (errors and warnings). `/api/file` and `/api/lsp/diagnostics` expose these diagnostics so both the virtualized code viewer (`renderer.js`) and diff viewer (`diff.js`) render inline diagnostic badges via CSS `data-diag` attributes without polluting DOM text nodes.
+- **Diagnostics**: `lspClient` advertises `publishDiagnostics: {}` during `initialize` and parses incoming `textDocument/publishDiagnostics` notifications into per-file `LSPDiagnostic` slices (errors and warnings). `/api/lsp/diagnostics` (and `/api/file`) expose them; the editor turns them into Monaco markers (§8).
 - **Idle Reaping (`ReapIdle`)**: Each `lspClient` records its last activity timestamp (`lastUsed`). The server's background scavenger (`Server.scavenge()`) calls `lspManager.ReapIdle(10 * time.Minute)`, shutting down idle language servers without marking them permanently stopped so they respawn transparently on the next request.
+
+## 8. The Monaco Side (`web/src/lsp.js`)
+
+`initLsp()` registers Monaco providers for every registered language on `file` URIs (workspace documents), backed by px0's endpoints. Positions are converted at the boundary: Monaco counts lines and columns from 1 in UTF-16 units; the API takes 1-based lines and 0-based UTF-16 columns.
+
+| Monaco provider | Endpoint | Fallback |
+| --- | --- | --- |
+| Hover | `/api/lsp/hover` (`wait` 2 s) | none |
+| Definition (F12, Ctrl/Cmd+Click, Peek) | `/api/lsp/def` (`wait` 5 s once the server is ready, 15 s while it starts) | `/api/def?sym=<word>`: px0's symbol index, for the word under the cursor |
+| References (Shift+F12) | `/api/lsp/refs` (`wait` 8 s) | none |
+| Document symbols (Go to Symbol, Outline) | `/api/lsp/symbols` | `/api/outline`: the regex outline (`internal/symbols`) |
+
+- **Warm-up.** When a file tab becomes active, `warm(path)` calls `/api/lsp/warm`, which starts the language server for the file's language if one is installed. While the state is `starting` or `indexing` it polls again (up to 25 times, 0.9 s apart). The state (`off`, `starting`, `indexing`, `ready`, `failed`) and the server's name are kept per path and shown in the status bar.
+- **Peek targets.** Monaco's peek widgets need models for the files they show, so the definition and reference providers open documents (`openDoc`) for up to 40 result files first. A definition in another file opens it through `registerEditorOpener` in `editors.js`; paths outside the workspace open read-only.
+- **Diagnostics.** `refreshDiagnostics(path)` reads `/api/lsp/diagnostics` and sets the model's `lsp` markers (severity, message, source, code, range). It runs when the server becomes ready, 600 ms after each save, and every 4 seconds for open documents whose server is ready and the page visible. Markers feed the squiggles, `F8` navigation, and the Problems panel (`problems.js`), which lists every marker by file.
+- **No completions.** px0 registers no completion, rename, formatting or code action providers; Monaco's own word-based suggestions are all the editor offers.

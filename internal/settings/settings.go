@@ -15,34 +15,28 @@ import (
 // Settings stores user configuration written to ~/.px0/settings.json (or XDG_CONFIG_HOME/px0/settings.json).
 // All settings are optional pointers so omitted values fall back to application defaults.
 type Settings struct {
-	Agent  string            `json:"agent,omitempty"`
-	Models map[string]string `json:"models,omitempty"`
-
-	EditorFontSize              *float64 `json:"editor.fontSize,omitempty"`
-	EditorFontFamily            *string  `json:"editor.fontFamily,omitempty"`
-	EditorLineHeight            *float64 `json:"editor.lineHeight,omitempty"`
-	EditorTabSize               *int     `json:"editor.tabSize,omitempty"`
-	EditorWordWrap              *string  `json:"editor.wordWrap,omitempty"`
-	EditorLineNumbers           *string  `json:"editor.lineNumbers,omitempty"`
-	EditorVimMode               *bool    `json:"editor.vimMode,omitempty"`
-	EditorRenderWhitespace      *string  `json:"editor.renderWhitespace,omitempty"`
-	EditorMinimapEnabled        *bool    `json:"editor.minimap.enabled,omitempty"`
-	WorkbenchColorTheme         *string  `json:"workbench.colorTheme,omitempty"`
-	DiffEditorRenderSideBySide  *bool    `json:"diffEditor.renderSideBySide,omitempty"`
-	MarkdownPreviewOpen         *bool    `json:"markdown.preview.open,omitempty"`
-	TablePreviewOpen            *bool    `json:"table.preview.open,omitempty"`
-	TelemetryEnabled            *bool    `json:"telemetry.enabled,omitempty"`
-	GitHubToken                 *string  `json:"github.token,omitempty"`
-	GitLabToken                 *string  `json:"gitlab.token,omitempty"`
-	GitLabHost                  *string  `json:"gitlab.host,omitempty"`
-	GiteaToken                  *string  `json:"gitea.token,omitempty"`
-	GiteaHost                   *string  `json:"gitea.host,omitempty"`
-	BitbucketToken              *string  `json:"bitbucket.token,omitempty"`
-	BitbucketEmail              *string  `json:"bitbucket.email,omitempty"`
-	GitCommitMessageInstruction *string  `json:"git.commitMessageInstruction,omitempty"`
-	ServerBasePath              *string  `json:"server.basePath,omitempty"`
-	ExplorerAutoReveal          *bool    `json:"explorer.autoReveal,omitempty"`
-	TipsEnabled                 *bool    `json:"tips.enabled,omitempty"`
+	EditorFontSize             *float64 `json:"editor.fontSize,omitempty"`
+	EditorFontFamily           *string  `json:"editor.fontFamily,omitempty"`
+	EditorLineHeight           *float64 `json:"editor.lineHeight,omitempty"`
+	EditorTabSize              *int     `json:"editor.tabSize,omitempty"`
+	EditorWordWrap             *string  `json:"editor.wordWrap,omitempty"`
+	EditorLineNumbers          *string  `json:"editor.lineNumbers,omitempty"`
+	EditorVimMode              *bool    `json:"editor.vimMode,omitempty"`
+	EditorRenderWhitespace     *string  `json:"editor.renderWhitespace,omitempty"`
+	EditorMinimapEnabled       *bool    `json:"editor.minimap.enabled,omitempty"`
+	WorkbenchColorTheme        *string  `json:"workbench.colorTheme,omitempty"`
+	DiffEditorRenderSideBySide *bool    `json:"diffEditor.renderSideBySide,omitempty"`
+	MarkdownPreviewOpen        *bool    `json:"markdown.preview.open,omitempty"`
+	TablePreviewOpen           *bool    `json:"table.preview.open,omitempty"`
+	GitHubToken                *string  `json:"github.token,omitempty"`
+	GitLabToken                *string  `json:"gitlab.token,omitempty"`
+	GitLabHost                 *string  `json:"gitlab.host,omitempty"`
+	GiteaToken                 *string  `json:"gitea.token,omitempty"`
+	GiteaHost                  *string  `json:"gitea.host,omitempty"`
+	BitbucketToken             *string  `json:"bitbucket.token,omitempty"`
+	BitbucketEmail             *string  `json:"bitbucket.email,omitempty"`
+	ServerBasePath             *string  `json:"server.basePath,omitempty"`
+	ExplorerAutoReveal         *bool    `json:"explorer.autoReveal,omitempty"`
 }
 
 var settingsMu sync.Mutex
@@ -84,27 +78,27 @@ var Schema = []SchemaItem{
 		Description: "Controls the font size in pixels for the code viewer.",
 		Category:    "Text Editor",
 		Type:        "number",
-		Default:     13.5,
-		Min:         numPtr(9.0),
+		Default:     14.0,
+		Min:         numPtr(6.0),
 		Max:         numPtr(32.0),
 		Step:        numPtr(0.5),
 	},
 	{
 		Key:         "editor.fontFamily",
 		Title:       "Font Family",
-		Description: "Controls the font family used in the code viewer.",
+		Description: "Controls the font family. Leave empty for VS Code's platform default (Menlo on macOS, Consolas on Windows, Droid Sans Mono on Linux).",
 		Category:    "Text Editor",
 		Type:        "string",
-		Default:     `"JetBrains Mono", "Fira Code", "Cascadia Code", "SF Mono", Menlo, Consolas, ui-monospace, monospace`,
+		Default:     "",
 	},
 	{
 		Key:         "editor.lineHeight",
 		Title:       "Line Height",
-		Description: "Controls the line height in pixels for the code viewer.",
+		Description: "Controls the line height in pixels. Use 0 to compute the line height from the font size.",
 		Category:    "Text Editor",
 		Type:        "number",
-		Default:     21.0,
-		Min:         numPtr(14.0),
+		Default:     0.0,
+		Min:         numPtr(0.0),
 		Max:         numPtr(48.0),
 		Step:        numPtr(1.0),
 	},
@@ -166,8 +160,10 @@ var Schema = []SchemaItem{
 		Description: "Specifies the color theme used in the workbench.",
 		Category:    "Workbench",
 		Type:        "select",
-		Default:     "catppuccin-mocha",
+		Default:     "vscode-dark-2026",
 		Options: []string{
+			"vscode-dark-2026", "vscode-light-2026",
+			"vscode-dark", "vscode-light",
 			"catppuccin-mocha", "catppuccin-latte",
 			"github-dark", "dark", "light",
 			"dracula", "gruvbox-dark", "gruvbox-light",
@@ -267,6 +263,26 @@ var Schema = []SchemaItem{
 		Default:     true,
 	},
 	{
+		Key:         "files.autoSave",
+		Title:       "Auto Save",
+		Description: "Save dirty files automatically after a delay or when the editor loses focus. Off disables Auto Save.",
+		Category:    "Files & Explorer",
+		Type:        "select",
+		Default:     "off",
+		Options:     []string{"off", "afterDelay", "onFocusChange"},
+	},
+	{
+		Key:         "files.autoSaveDelay",
+		Title:       "Auto Save Delay",
+		Description: "Milliseconds after the last edit before saving when Auto Save is afterDelay.",
+		Category:    "Files & Explorer",
+		Type:        "number",
+		Default:     1000,
+		Min:         numPtr(0),
+		Max:         numPtr(2147483647),
+		Step:        numPtr(1),
+	},
+	{
 		Key:         "files.exclude",
 		Title:       "Files Exclude Patterns",
 		Description: "Configure glob patterns for excluding files and folders from search and trees.",
@@ -324,41 +340,6 @@ var Schema = []SchemaItem{
 		Category:    "LSP & Intelligence",
 		Type:        "boolean",
 		Default:     true,
-	},
-	{
-		Key:         "agent.harness",
-		Title:       "Coding Harness",
-		Description: "Coding agent harness invoked for code edits (e.g. claude, gemini, cursor-agent, agy, opencode, codex, aider, goose).",
-		Category:    "Agent / AI",
-		Type:        "string",
-		Default:     "",
-	},
-	{
-		Key:         "agent.timeoutSeconds",
-		Title:       "Agent Timeout (Seconds)",
-		Description: "Controls the maximum execution time in seconds for agent edits before canceling.",
-		Category:    "Agent / AI",
-		Type:        "number",
-		Default:     120.0,
-		Min:         numPtr(10.0),
-		Max:         numPtr(600.0),
-		Step:        numPtr(10.0),
-	},
-	{
-		Key:         "agent.autoAcceptEdits",
-		Title:       "Auto Accept Agent Edits",
-		Description: "Controls whether agent-generated code diffs are accepted without manual confirmation.",
-		Category:    "Agent / AI",
-		Type:        "boolean",
-		Default:     false,
-	},
-	{
-		Key:         "git.commitMessageInstruction",
-		Title:       "Commit Message Instructions",
-		Description: "Extra instructions given to the coding harness when it writes a commit message for the staged diff (e.g. \"Follow Conventional Commits\" or \"Reference the ticket number in the branch name\").",
-		Category:    "Git & Diff",
-		Type:        "textarea",
-		Default:     "",
 	},
 	{
 		Key:         "github.token",
@@ -429,23 +410,177 @@ var Schema = []SchemaItem{
 		Default:     "/",
 	},
 	{
-		Key:         "tips.enabled",
-		Title:       "Show Tips in Interface",
-		Description: "Controls whether px0 periodically shows helpful tips and tricks in the interface.",
-		Category:    "General",
+		Key:         "terminal.integrated.shell",
+		Title:       "Shell",
+		Description: "The shell the integrated terminal runs. Leave empty for $SHELL, then bash, zsh or sh.",
+		Category:    "Terminal",
+		Type:        "string",
+		Default:     "",
+	},
+	{
+		Key:         "terminal.integrated.fontSize",
+		Title:       "Font Size",
+		Description: "Controls the font size in pixels of the terminal.",
+		Category:    "Terminal",
+		Type:        "number",
+		Default:     14.0,
+		Min:         numPtr(6.0),
+		Max:         numPtr(32.0),
+		Step:        numPtr(1.0),
+	},
+	{
+		Key:         "terminal.integrated.fontFamily",
+		Title:       "Font Family",
+		Description: "Controls the font family of the terminal. Leave empty to use the editor's font.",
+		Category:    "Terminal",
+		Type:        "string",
+		Default:     "",
+	},
+	{
+		Key:         "terminal.integrated.lineHeight",
+		Title:       "Line Height",
+		Description: "Controls the line height of the terminal, multiplied by the font size.",
+		Category:    "Terminal",
+		Type:        "number",
+		Default:     1.0,
+		Min:         numPtr(1.0),
+		Max:         numPtr(3.0),
+		Step:        numPtr(0.1),
+	},
+	{
+		Key:         "terminal.integrated.cursorStyle",
+		Title:       "Cursor Style",
+		Description: "Controls the style of the terminal cursor.",
+		Category:    "Terminal",
+		Type:        "select",
+		Default:     "block",
+		Options:     []string{"block", "line", "underline"},
+	},
+	{
+		Key:         "terminal.integrated.cursorBlinking",
+		Title:       "Cursor Blinking",
+		Description: "Controls whether the terminal cursor blinks.",
+		Category:    "Terminal",
+		Type:        "boolean",
+		Default:     false,
+	},
+	{
+		Key:         "terminal.integrated.scrollback",
+		Title:       "Scrollback",
+		Description: "Controls the maximum number of lines the terminal keeps in its buffer.",
+		Category:    "Terminal",
+		Type:        "number",
+		Default:     1000.0,
+		Min:         numPtr(100.0),
+		Max:         numPtr(100000.0),
+		Step:        numPtr(100.0),
+	},
+	{
+		Key:         "terminal.integrated.fontWeight",
+		Title:       "Font Weight",
+		Description: "The font weight to use within the terminal for non-bold text.",
+		Category:    "Terminal",
+		Type:        "select",
+		Default:     "normal",
+		Options:     []string{"normal", "bold", "100", "200", "300", "400", "500", "600", "700", "800", "900"},
+	},
+	{
+		Key:         "terminal.integrated.fontWeightBold",
+		Title:       "Font Weight Bold",
+		Description: "The font weight to use within the terminal for bold text.",
+		Category:    "Terminal",
+		Type:        "select",
+		Default:     "bold",
+		Options:     []string{"normal", "bold", "100", "200", "300", "400", "500", "600", "700", "800", "900"},
+	},
+	{
+		Key:         "terminal.integrated.letterSpacing",
+		Title:       "Letter Spacing",
+		Description: "Controls the letter spacing of the terminal, in pixels added between characters.",
+		Category:    "Terminal",
+		Type:        "number",
+		Default:     0.0,
+		Min:         numPtr(0.0),
+		Max:         numPtr(10.0),
+		Step:        numPtr(1.0),
+	},
+	{
+		Key:         "terminal.integrated.minimumContrastRatio",
+		Title:       "Minimum Contrast Ratio",
+		Description: "When set, the foreground color of each cell changes to meet this contrast ratio with its background (1 leaves colors as they are, 21 is black and white).",
+		Category:    "Terminal",
+		Type:        "number",
+		Default:     4.5,
+		Min:         numPtr(1.0),
+		Max:         numPtr(21.0),
+		Step:        numPtr(0.5),
+	},
+	{
+		Key:         "terminal.integrated.gpuAcceleration",
+		Title:       "GPU Acceleration",
+		Description: "Draws the terminal with WebGL, which is much faster under heavy output. auto falls back to the DOM renderer when WebGL is unavailable.",
+		Category:    "Terminal",
+		Type:        "select",
+		Default:     "auto",
+		Options:     []string{"auto", "on", "off"},
+	},
+	{
+		Key:         "terminal.integrated.shellIntegration.enabled",
+		Title:       "Shell Integration",
+		Description: "Loads shell integration into bash, which marks each command so the terminal can show whether it failed, step between commands (Ctrl+Up/Down), and follow the working directory. Applies to new terminals.",
+		Category:    "Terminal",
 		Type:        "boolean",
 		Default:     true,
+	},
+	{
+		Key:         "terminal.integrated.shellIntegration.decorationsEnabled",
+		Title:       "Shell Integration Decorations",
+		Description: "Where to show each command's status: in the gutter beside it, in the overview ruler beside the scrollbar, both, or neither.",
+		Category:    "Terminal",
+		Type:        "select",
+		Default:     "both",
+		Options:     []string{"both", "gutter", "overviewRuler", "never"},
+	},
+	{
+		Key:         "terminal.integrated.copyOnSelection",
+		Title:       "Copy On Selection",
+		Description: "Controls whether text selected in the terminal is copied to the clipboard.",
+		Category:    "Terminal",
+		Type:        "boolean",
+		Default:     false,
+	},
+	{
+		Key:         "terminal.integrated.altClickMovesCursor",
+		Title:       "Alt Click Moves Cursor",
+		Description: "Alt+click moves the cursor to the mouse position on the shell's command line.",
+		Category:    "Terminal",
+		Type:        "boolean",
+		Default:     true,
+	},
+	{
+		Key:         "terminal.integrated.sendKeybindingsToShell",
+		Title:       "Send Keybindings To Shell",
+		Description: "Sends almost every key to the shell while a terminal has focus (Ctrl+P, Ctrl+B, ...) instead of running px0's shortcuts. Toggle Terminal, New Terminal, Split Terminal, and the Command Palette still work.",
+		Category:    "Terminal",
+		Type:        "boolean",
+		Default:     false,
+	},
+	{
+		Key:         "terminal.integrated.enableBell",
+		Title:       "Enable Bell",
+		Description: "Shows a bell on the terminal's tab for a moment when a program rings the terminal bell.",
+		Category:    "Terminal",
+		Type:        "boolean",
+		Default:     false,
 	},
 }
 
 func DefaultMap() map[string]any {
-	res := make(map[string]any, len(Schema)+3)
+	res := make(map[string]any, len(Schema)+1)
 	for _, item := range Schema {
 		res[item.Key] = item.Default
 	}
 	res["explorer.autoRelveal"] = true
-	res["agent"] = ""
-	res["models"] = map[string]string{}
 	return res
 }
 
@@ -493,29 +628,12 @@ func readSettingsLocked() Settings {
 	// Unmarshal known typed fields directly from data without re-marshaling raw
 	_ = json.Unmarshal(data, &s)
 
-	// Bi-directional bridge between agent <-> agent.harness
-	if s.Agent == "" {
-		if h, ok := raw["agent.harness"].(string); ok && h != "" {
-			s.Agent = h
-		}
-	}
 	// Support server.basePath and basePath fallback
 	if s.ServerBasePath == nil {
 		if bp, ok := raw["server.basePath"].(string); ok && bp != "" {
 			s.ServerBasePath = &bp
 		} else if bp, ok := raw["basePath"].(string); ok && bp != "" {
 			s.ServerBasePath = &bp
-		}
-	}
-	// Bi-directional bridge between models <-> agent.models
-	if s.Models == nil || len(s.Models) == 0 {
-		if am, ok := raw["agent.models"].(map[string]any); ok {
-			s.Models = make(map[string]string, len(am))
-			for k, v := range am {
-				if vs, ok := v.(string); ok {
-					s.Models[k] = vs
-				}
-			}
 		}
 	}
 	// Support explorer.autoReveal and explorer.autoRelveal
@@ -544,20 +662,6 @@ func ReadMergedMap() map[string]any {
 
 	for k, v := range raw {
 		res[k] = v
-	}
-
-	// Synchronize agent / agent.harness
-	if ag, ok := raw["agent"].(string); ok && ag != "" {
-		res["agent.harness"] = ag
-	} else if ah, ok := raw["agent.harness"].(string); ok && ah != "" {
-		res["agent"] = ah
-	}
-
-	// Synchronize models / agent.models
-	if m, ok := raw["models"].(map[string]any); ok && len(m) > 0 {
-		res["agent.models"] = m
-	} else if am, ok := raw["agent.models"].(map[string]any); ok && len(am) > 0 {
-		res["models"] = am
 	}
 
 	// Synchronize server.basePath / basePath
@@ -611,35 +715,6 @@ func ReadRawJSON() string {
 	return string(data)
 }
 
-// Write saves the agent and models choices while preserving other settings.
-func Write(s Settings) error {
-	p := Path()
-	if p == "" {
-		return errors.New("no home directory to save settings in")
-	}
-	settingsMu.Lock()
-	defer settingsMu.Unlock()
-
-	raw := ReadRawMap()
-	if s.Agent != "" {
-		raw["agent"] = s.Agent
-		raw["agent.harness"] = s.Agent
-	} else {
-		delete(raw, "agent")
-		delete(raw, "agent.harness")
-	}
-
-	if s.Models != nil && len(s.Models) > 0 {
-		raw["models"] = s.Models
-		raw["agent.models"] = s.Models
-	} else if s.Agent == "" {
-		delete(raw, "models")
-		delete(raw, "agent.models")
-	}
-
-	return writeRawMapLocked(p, raw)
-}
-
 // UpdateMap merges key-value pairs into settings.json without losing existing keys.
 func UpdateMap(updates map[string]any) error {
 	p := Path()
@@ -655,36 +730,6 @@ func UpdateMap(updates map[string]any) error {
 			delete(raw, k)
 		} else {
 			raw[k] = v
-		}
-
-		// Keep agent / agent.harness in sync
-		if k == "agent" {
-			if v == nil || v == "" {
-				delete(raw, "agent.harness")
-			} else {
-				raw["agent.harness"] = v
-			}
-		} else if k == "agent.harness" {
-			if v == nil || v == "" {
-				delete(raw, "agent")
-			} else {
-				raw["agent"] = v
-			}
-		}
-
-		// Keep models / agent.models in sync
-		if k == "models" {
-			if v == nil {
-				delete(raw, "agent.models")
-			} else {
-				raw["agent.models"] = v
-			}
-		} else if k == "agent.models" {
-			if v == nil {
-				delete(raw, "models")
-			} else {
-				raw["models"] = v
-			}
 		}
 
 		// Keep server.basePath / basePath in sync
@@ -735,13 +780,6 @@ func SaveRawJSON(rawJSON []byte) error {
 	}
 	settingsMu.Lock()
 	defer settingsMu.Unlock()
-
-	// Sync agent bridges if present
-	if ag, ok := m["agent"].(string); ok && ag != "" {
-		m["agent.harness"] = ag
-	} else if ah, ok := m["agent.harness"].(string); ok && ah != "" {
-		m["agent"] = ah
-	}
 
 	return writeRawMapLocked(p, m)
 }

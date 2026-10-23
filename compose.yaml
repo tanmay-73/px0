@@ -1,0 +1,38 @@
+services:
+  px0:
+    build: .
+    image: px0:local
+    container_name: px0
+    restart: unless-stopped
+    # The workbench (no folder argument): lists every git repository under
+    # PX0_REPOS and opens each as its own workspace. -roots keeps browsing and
+    # opening inside that folder, so the rest of the container stays out of reach.
+    # Enable the integrated terminal for clients on the local network.
+    command: ["-terminal", "-roots", "${PX0_REPOS:-/mnt/nvme1/Projects}"]
+    working_dir: ${PX0_REPOS:-/mnt/nvme1/Projects}
+    ports:
+      - "10.20.7.180:7777:7777"
+    volumes:
+      # Mounted at the same path as on the host, so the paths px0 shows are
+      # the host's own.
+      - ${PX0_REPOS:-/mnt/nvme1/Projects}:${PX0_REPOS:-/mnt/nvme1/Projects}
+      - px0-home:/home/px0
+      # Your git identity, so commits made in px0 carry your name and email.
+      - ${HOME}/.gitconfig:/home/px0/.gitconfig:ro
+      # To push over HTTPS with the credentials `git credential-store` keeps,
+      # uncomment this. Anyone who can reach px0 can then push as you.
+      # - ${HOME}/.git-credentials:/home/px0/.git-credentials:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7777/api/wb/ping"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  px0-home:

@@ -1,278 +1,157 @@
 // web/src/palette.js
-import { $, esc, S, doc_, api, debounce, withKeys } from './state.js';
-import { render, toggleWordWrap } from './renderer.js';
-import { openFile, centerLine, closeTab, closeAllTabs, reopenClosedTab } from './tabs.js';
-import { updateStatus, openLspMenu } from './status.js';
-import { pushHistory } from './history.js';
-import { showPanel, reindexWorkspace } from './panels.js';
-import { openFind } from './find.js';
-import { gotoDefinition, findReferences } from './lsp.js';
-import { revealFile } from './tree.js';
-import { showRightInspector, hideRightInspector } from './inspector.js';
-import { showCalls } from './calls.js';
-import { showHelp } from './shortcuts.js';
-import { listThemes, currentTheme, setTheme, cycleTheme } from './theme.js';
-import { togglePreview } from './markdown.js';
-import { openSettings, isAutoRevealEnabled } from './settings.js';
-import { showVimHelp, isVimEnabled, setVimModeEnabled } from './vim.js';
-import { launchPR } from './pr.js';
-import { newThread, deleteCurrentThread } from './thread.js';
-import { copyToClipboard, copyRichToClipboard } from './ui.js';
-import { getDocRaw } from './markdown.js';
-import { getSelectedRangeInfo } from './selbar.js';
-import { enterEditMode, exitEditMode, saveActiveFile } from './editview.js';
-import { promptNewItem } from './newitem.js';
-import { navigateToTips, showTipWidget } from './tips.js';
+// Quick Open (Ctrl+P) and the Command Palette (Ctrl+Shift+P): one box whose
+// first character picks the mode, as in VS Code:
+//   (none)  files, fuzzy-matched by the server (/api/find), recent first
+//   >       commands
+//   @       symbols in the active file
+//   :       go to line[:column]
+import { api } from './api.js';
+import { basename, dirname, pref, setPref, on } from './util.js';
+import { quickPick, highlight, fuzzy } from './quickinput.js';
+import { allCommands, run } from './commands.js';
+import { openFile, activeTab, activeEditor } from './editors.js';
+import { documentSymbols } from './lsp.js';
+import { fileIcon } from './icons.js';
+import { monaco } from './monaco.js';
 
-export const overlay = $('#overlay');
-export const palInput = $('#pal');
-export const palList = $('#pal-list');
-export let pal = null;
+const RECENT_KEY = () => 'recentFiles:' + location.pathname;
+const recentCmdKey = 'recentCommands';
 
+function recentFiles() { return pref(RECENT_KEY(), []); }
 
-export const COMMANDS = [
-  { name: withKeys('File: Copy Source Code ({Mod+C})'), run: () => {
-    const info = getSelectedRangeInfo();
-    const d = doc_();
-    if (info && info.text) {
-      copyToClipboard(info.text, 'Copied source code');
-    } else if (d) {
-      getDocRaw(d).then(raw => copyToClipboard(raw, `Copied ${d.name} (${d.total} lines)`));
-    }
-  } },
-  { name: 'File: Copy Raw Markdown', run: () => {
-    const d = doc_();
-    if (!d) return;
-    const info = getSelectedRangeInfo();
-    if (info && info.rawMarkdown) {
-      copyToClipboard(info.rawMarkdown, 'Copied raw Markdown');
-    } else {
-      getDocRaw(d).then(raw => copyToClipboard(raw, `Copied ${d.name} (${d.total} lines)`));
-    }
-  } },
-  { name: 'File: Copy Formatted Text (Markdown Preview)', run: () => {
-    const info = getSelectedRangeInfo();
-    if (info && info.isMarkdownPreview) {
-      copyRichToClipboard(info.text, info.html, 'Copied formatted text');
-    } else {
-      const d = doc_();
-      if (d) getDocRaw(d).then(raw => copyToClipboard(raw, `Copied ${d.name}`));
-    }
-  } },
-  { name: 'File: Copy Relative Path', run: () => {
-    const d = doc_();
-    if (d) copyToClipboard(d.path, `Copied ${d.path}`);
-  } },
-  { name: withKeys('File: Edit Current File ({Mod+E})'), run: () => {
-    const d = doc_();
-    if (d && !d.isImage && !d.deleted && !d.diffRef) {
-      if (d.isEditing) exitEditMode();
-      else enterEditMode();
-    }
-  } },
-  { name: withKeys('File: Save File ({Mod+S})'), run: () => saveActiveFile() },
-  { name: 'File: New File…', run: () => promptNewItem('file') },
-  { name: 'File: New Folder…', run: () => promptNewItem('dir') },
-  { name: withKeys('Preferences: Open Settings (UI) ({Mod+,})'), run: () => openSettings('ui') },
-  { name: 'Preferences: Open Settings (JSON)', run: () => openSettings('json') },
-  { name: 'Go to File…', run: () => openPalette('file') },
-  { name: 'Go to Symbol in File…', run: () => openPalette('symbol') },
-  { name: 'Go to Line…', run: () => openPalette('line') },
-  { name: 'Search in Files', run: () => showRightInspector('search') },
-  { name: 'Find in Current File', run: () => openFind(S.lastWord) },
-  { name: 'Go to Definition', run: () => gotoDefinition() },
-  { name: 'Find All References (Right Panel)', run: () => findReferences() },
-  { name: withKeys('Show Call Trail: Callers / Callees ({Alt+Shift+H})'), run: () => showCalls() },
-  { name: 'Language Servers: Setup & Manage…', run: () => openLspMenu() },
-  { name: 'Set Up Language Server…', run: () => openLspMenu() },
-  { name: 'Toggle Right Sidebar / Inspector', run: () => {
-    if (document.body.classList.contains('right-hidden')) showRightInspector();
-    else hideRightInspector();
-  } },
-  { name: 'Show File Symbols (Right Panel)', run: () => showRightInspector('symbols') },
-  { name: 'Reveal Active File in Explorer', run: () => { const d = doc_(); if (d) { showPanel('files'); revealFile(d.path); } } },
-  { name: withKeys('Toggle Word Wrap ({Alt+Z})'), run: () => toggleWordWrap() },
-  { name: withKeys('Toggle Markdown / Table Preview ({Alt+M})'), run: () => togglePreview() },
-  { name: withKeys('Toggle Sidebar ({Mod+B})'), run: () => document.body.classList.toggle('side-hidden') },
-  { name: 'Select Theme…', run: () => openPalette('theme') },
-  { name: 'Next Theme', run: cycleTheme },
-  { name: 'Re-index Workspace', run: reindexWorkspace },
-  { name: 'Close Tab', run: () => { if (S.active >= 0) closeTab(S.active); } },
-  { name: 'Close All Tabs', run: () => closeAllTabs() },
-  { name: withKeys('Reopen Closed Tab ({Alt+Shift+T})'), run: () => reopenClosedTab() },
-  { name: 'Threads: Show All', run: () => showRightInspector('threads') },
-  { name: withKeys('Threads: Start New Thread ({Alt+T} on a selection)'), run: () => newThread(null) },
-  { name: 'Threads: Delete Current Thread', run: deleteCurrentThread },
-  { name: 'Git: Open Pull Request…', run: () => openPalette('openpr', '') },
-  { name: 'Preferences: Toggle Vim Keybindings', run: () => setVimModeEnabled(!isVimEnabled(), true) },
-  { name: 'Help: Vim Keybindings Cheat Sheet', run: showVimHelp },
-  { name: 'Help: Tips & Tricks (All Tips)', run: () => navigateToTips() },
-  { name: 'Help: Show Tip', run: () => showTipWidget() },
-  { name: 'Keyboard Shortcuts', run: showHelp },
-];
-
-export const PAL_MODES = {
-  file: { tag: 'File', hint: 'Type to fuzzy-match any file. Prefix : for a line, @ for a symbol, > for a command.' },
-  symbol: { tag: 'Symbol', hint: 'Symbols in the active file.' },
-  line: { tag: 'Line', hint: 'Enter a line number.' },
-  command: { tag: 'Command', hint: '' },
-  theme: { tag: 'Theme', hint: 'Arrows preview a theme. Enter keeps it, Esc restores the previous one.' },
-  openpr: { tag: 'Open PR', hint: 'Full pull request URL (e.g. https://github.com/owner/repo/pull/123), then Enter.' },
-};
-
-export function openPalette(mode, seed) {
-  pal = { mode, items: [], sel: 0, restoreTheme: mode === 'theme' ? currentTheme() : null };
-  overlay.hidden = false;
-  palInput.value = seed !== undefined ? seed : ({ symbol: '@', line: ':', command: '>' }[mode] || '');
-  $('#pal-mode').textContent = PAL_MODES[mode].tag;
-  $('#pal-hint').textContent = PAL_MODES[mode].hint;
-  palInput.focus();
-  palInput.setSelectionRange(palInput.value.length, palInput.value.length);
-  refreshPalette();
+export function noteRecentFile(path) {
+  if (!path || path.startsWith('/')) return;
+  const list = recentFiles().filter(p => p !== path);
+  list.unshift(path);
+  setPref(RECENT_KEY(), list.slice(0, 50));
 }
 
-let palSeq = 0;
-
-export function closePalette() {
-  palSeq++;
-  overlay.hidden = true;
-  if (pal && pal.restoreTheme) setTheme(pal.restoreTheme, false); // dismissed mid-preview
-  pal = null;
+function fileItem(path, pos) {
+  const name = basename(path);
+  const cut = path.length - name.length;
+  return {
+    label: name, path, icon: fileIcon(path),
+    labelHTML: pos ? highlight(name, pos.filter(p => p >= cut).map(p => p - cut)) : undefined,
+    descriptionHTML: pos ? highlight(dirname(path), pos.filter(p => p < cut - 1)) : undefined,
+    description: dirname(path),
+  };
 }
 
-export const refreshPalette = debounce(async () => {
-  if (!pal) return;
-  const seq = ++palSeq;
-  let raw = palInput.value;
-  // theme and openpr have no prefix character: once entered (via a command),
-  // they stay put regardless of what's typed, unlike file/symbol/line/command
-  // which re-derive their mode from the input on every keystroke.
-  let mode = (pal.mode === 'theme' || pal.mode === 'openpr') ? pal.mode : 'file';
-  if (mode === 'theme' || mode === 'openpr') { /* no prefixes: the query is the value itself */ }
-  else if (raw.startsWith('>')) { mode = 'command'; raw = raw.slice(1); }
-  else if (raw.startsWith('@')) { mode = 'symbol'; raw = raw.slice(1); }
-  else if (raw.startsWith(':')) { mode = 'line'; raw = raw.slice(1); }
-  pal.mode = mode;
-  $('#pal-mode').textContent = PAL_MODES[mode].tag;
-  $('#pal-hint').textContent = PAL_MODES[mode].hint;
-  const q = raw.trim();
-
-  if (mode === 'line') {
-    const d = doc_();
-    const n = parseInt(q, 10);
-    pal.items = (d && n > 0) ? [{ kind: 'line', n: Math.min(n, d.total), label: 'Line ' + Math.min(n, d.total), sub: d.path }] : [];
-  } else if (mode === 'command') {
-    const lq = q.toLowerCase();
-    pal.items = COMMANDS.filter(c => c.name.toLowerCase().includes(lq)).map(c => ({ kind: 'cmd', cmd: c, label: c.name, sub: '' }));
-  } else if (mode === 'symbol') {
-    const d = doc_();
-    if (d && !d.outline) {
-      try { d.outline = (await api('/api/outline', { path: d.path })).symbols || []; } catch { d.outline = []; }
-      if (seq !== palSeq || !pal) return;
-    }
-    const lq = q.toLowerCase();
-    pal.items = ((d && d.outline) || []).filter(s => !lq || s.name.toLowerCase().includes(lq))
-      .slice(0, 400).map(s => ({ kind: 'sym', n: s.line, label: s.name, sub: s.kind, right: String(s.line) }));
-  } else if (mode === 'theme') {
-    const lq = q.toLowerCase();
-    pal.items = listThemes().filter(t => (t.name + ' ' + t.id).toLowerCase().includes(lq))
-      .map(t => ({ kind: 'theme', id: t.id, label: t.name, sub: t.scheme, right: t.id === pal.restoreTheme ? 'current' : '' }));
-  } else if (mode === 'openpr') {
-    pal.items = q ? [{ kind: 'openpr', target: q, label: 'Open PR: ' + esc(q), sub: 'Enter to open in a new tab', raw: true }] : [];
-  } else {
-    let j;
-    try { j = await api('/api/find', { q, limit: 120 }); } catch { return; }
-    if (seq !== palSeq || !pal) return;
-    pal.indexing = !!j.indexing;
-    pal.items = (j.results || []).map(r => {
-      const cut = r.path.length - r.name.length;
-      return {
-        kind: 'file', path: r.path,
-        label: fuzzyHTML(r.path.slice(cut), (r.pos || []).filter(p => p >= cut).map(p => p - cut)),
-        sub: fuzzyHTML(r.path.slice(0, Math.max(0, cut - 1)), (r.pos || []).filter(p => p < cut)),
-        raw: true,
-      };
-    });
-    if (pal.indexing && pal.mode === 'file') {
-      setTimeout(() => {
-        if (pal && pal.mode === 'file' && pal.indexing) refreshPalette();
-      }, 300);
-    }
+async function fileItems(q) {
+  if (!q) {
+    const cur = activeTab()?.path;
+    const rec = recentFiles().filter(p => p !== cur).slice(0, 20);
+    return rec.length ? [{ separator: true, label: 'recently opened' }, ...rec.map(p => fileItem(p))] : [];
   }
-  pal.sel = mode === 'theme' ? Math.max(0, pal.items.findIndex(it => it.id === currentTheme())) : 0;
-  drawPalette();
-}, 40);
+  const j = await api('api/find', { q, limit: 100 });
+  const items = (j.results || []).map(r => fileItem(r.path, r.pos));
+  return items.length ? [{ separator: true, label: 'file results' }, ...items] : [];
+}
 
-export function fuzzyHTML(text, pos) {
-  if (!pos || !pos.length) return esc(text);
-  const set = new Set(pos);
-  let out = '', open = false;
-  for (let i = 0; i < text.length; i++) {
-    const hit = set.has(i);
-    if (hit && !open) { out += '<b>'; open = true; }
-    if (!hit && open) { out += '</b>'; open = false; }
-    out += esc(text[i]);
+function commandItems(q) {
+  const recent = pref(recentCmdKey, []);
+  const cmds = allCommands();
+  const items = [];
+  for (const c of cmds) {
+    const label = (c.category ? c.category + ': ' : '') + c.title;
+    const m = fuzzy(q, label);
+    if (!m) continue;
+    items.push({ label, labelHTML: highlight(label, m.pos), keys: c.keys?.[0], id: c.id, _score: m.score, _recent: recent.indexOf(c.id) });
   }
-  return out + (open ? '</b>' : '');
-}
-
-export function drawPalette() {
-  if (!pal) return;
-  if (!pal.items.length) {
-    if (pal.indexing) {
-      palList.innerHTML = '<div class="pi"><span class="pp">Indexing…</span></div>';
-      return;
-    }
-    palList.innerHTML = '<div class="pi"><span class="pp">No matches</span></div>';
-    return;
+  if (!q) {
+    const rec = items.filter(i => i._recent >= 0).sort((a, b) => a._recent - b._recent);
+    const rest = items.filter(i => i._recent < 0).sort((a, b) => a.label.localeCompare(b.label));
+    return [...(rec.length ? [{ separator: true, label: 'recently used' }] : []), ...rec, ...(rec.length ? [{ separator: true, label: 'other commands' }] : []), ...rest];
   }
-  palList.innerHTML = pal.items.map((it, i) =>
-    '<div class="pi' + (i === pal.sel ? ' sel' : '') + '" data-i="' + i + '">' +
-    '<span class="pn">' + (it.raw ? it.label : esc(it.label)) + '</span>' +
-    '<span class="pp">' + (it.raw ? it.sub : esc(it.sub || '')) + '</span>' +
-    (it.right ? '<span class="pr">' + esc(it.right) + '</span>' : '') + '</div>').join('');
-  const s = palList.children[pal.sel];
-  if (s) s.scrollIntoView({ block: 'nearest' });
-  if (pal.mode === 'theme') setTheme(pal.items[pal.sel].id, false); // live preview
+  return items.sort((a, b) => b._score - a._score);
 }
 
-export function movePalette(delta) {
-  if (!pal || !pal.items.length) return;
-  pal.sel = (pal.sel + delta + pal.items.length) % pal.items.length;
-  drawPalette();
+let symbolCache = { path: '', syms: [] };
+
+async function symbolItems(q) {
+  const t = activeTab();
+  if (!t?.path || t.kind !== 'file') return [{ label: 'To go to a symbol, first open a text editor with symbol information.', disabled: true }];
+  if (symbolCache.path !== t.path) symbolCache = { path: t.path, syms: await documentSymbols(t.path) };
+  const out = [];
+  for (const s of symbolCache.syms) {
+    const m = fuzzy(q, s.name);
+    if (!m) continue;
+    out.push({ label: s.name, labelHTML: highlight(s.name, m.pos), description: s.kind + (s.detail ? ' ' + s.detail : ''), icon: 'symbol-' + symIcon(s.kind), line: s.line, _score: m.score });
+  }
+  if (q) out.sort((a, b) => b._score - a._score);
+  return out.length ? out : [{ label: 'No matching symbols', disabled: true }];
 }
 
-export async function acceptPalette() {
-  if (!pal || !pal.items.length) return;
-  const it = pal.items[pal.sel];
-  if (it.kind === 'theme') pal.restoreTheme = null;
-  closePalette();
-  if (it.kind === 'file') {
-    await openFile(it.path);
-    if (isAutoRevealEnabled()) {
-      await showPanel('files');
-      await revealFile(it.path);
-    }
-  } else if (it.kind === 'sym' || it.kind === 'line') {
-    const d = doc_(); if (!d) return;
-    d.cur = it.n; centerLine(it.n); render(); updateStatus(); pushHistory(d.path, it.n);
-  } else if (it.kind === 'cmd') it.cmd.run();
-  else if (it.kind === 'theme') setTheme(it.id);
-  else if (it.kind === 'openpr') launchPR(it.target);
+const symIcon = k => ({ func: 'method', function: 'method', method: 'method', class: 'class', struct: 'structure', interface: 'interface', type: 'class', enum: 'enum', const: 'constant', var: 'variable', field: 'field', heading: 'string' }[(k || '').toLowerCase()] || 'field');
+
+function lineItems(q) {
+  const ed = activeEditor();
+  const model = ed?.getModel();
+  if (!model) return [{ label: 'Open a text editor first to go to a line.', disabled: true }];
+  const [l, c] = q.split(/[:,]/).map(n => parseInt(n, 10));
+  const total = model.getLineCount();
+  if (!l) return [{ label: `Current Line: ${ed.getPosition().lineNumber}, Character: ${ed.getPosition().column}. Type a line number between 1 and ${total} to navigate to.`, disabled: true }];
+  const line = Math.min(Math.max(1, l), total);
+  return [{ label: `Go to line ${line}${c ? `, character ${c}` : ''}.`, line, col: c || 1 }];
+}
+
+/* showQuickOpen(prefix) opens the box seeded with a mode character. */
+export function showQuickOpen(prefix = '') {
+  let mode = '';
+  const modeOf = v => (v.startsWith('>') ? '>' : v.startsWith('@') ? '@' : v.startsWith(':') ? ':' : '');
+  quickPick({
+    value: prefix,
+    placeholder: 'Search files by name (append : to go to line or @ to go to symbol)',
+    items: async v => {
+      mode = modeOf(v);
+      const q = mode ? v.slice(1).trim() : v.trim();
+      if (mode === '>') return commandItems(q);
+      if (mode === '@') return symbolItems(q);
+      if (mode === ':') return lineItems(q);
+      // "file.go:42" opens at a line.
+      const at = /^(.*?):(\d+)(?::(\d+))?$/.exec(q);
+      const items = await fileItems(at ? at[1] : q);
+      if (at) for (const it of items) if (it.path) { it.line = +at[2]; it.col = at[3] ? +at[3] : 1; }
+      return items;
+    },
+    emptyText: v => (modeOf(v) === '>' ? 'No matching commands' : 'No matching results'),
+    onActive: it => {
+      if (mode === '@' && it.line) activeEditor()?.revealLineInCenterIfOutsideViewport(it.line);
+    },
+    onAccept: async (it, { newTab }) => {
+      if (it.disabled) return false;
+      if (it.id) {
+        const rec = pref(recentCmdKey, []).filter(x => x !== it.id);
+        rec.unshift(it.id);
+        setPref(recentCmdKey, rec.slice(0, 20));
+        setTimeout(() => run(it.id), 0);
+        return;
+      }
+      if (it.path) { await openFile(it.path, { line: it.line, col: it.col, sideBySide: newTab }); return; }
+      if (it.line) {
+        const ed = activeEditor();
+        if (!ed) return;
+        ed.setPosition({ lineNumber: it.line, column: it.col || 1 });
+        ed.revealLineInCenter(it.line, monaco.editor.ScrollType.Smooth);
+        ed.focus();
+      }
+    },
+  });
 }
 
 export function initPalette() {
-  palInput.addEventListener('input', refreshPalette);
-  palInput.addEventListener('keydown', e => {
-    if (e.key === 'ArrowDown' || (e.ctrlKey && e.key === 'n')) { e.preventDefault(); movePalette(1); }
-    else if (e.key === 'ArrowUp' || (e.ctrlKey && e.key === 'p')) { e.preventDefault(); movePalette(-1); }
-    else if (e.key === 'Enter') { e.preventDefault(); acceptPalette(); }
-    else if (e.key === 'Escape') { e.preventDefault(); closePalette(); }
-    else if (e.key === 'Tab') { e.preventDefault(); movePalette(e.shiftKey ? -1 : 1); }
+  on('editor:active', t => { if (t?.kind === 'file') noteRecentFile(t.path); symbolCache = { path: '', syms: [] }; });
+  on('doc:saved', () => { symbolCache = { path: '', syms: [] }; });
+}
+
+// A picker for any file in the workspace, for commands that need one.
+export function pickFile(placeholder) {
+  return new Promise(resolve => {
+    quickPick({
+      placeholder,
+      items: q => fileItems(q.trim()),
+      onAccept: it => { if (!it.path) return false; resolve(it.path); },
+      onCancel: () => resolve(null),
+    });
   });
-  palList.addEventListener('click', e => {
-    const p = e.target.closest('.pi');
-    if (p && p.dataset.i !== undefined) { pal.sel = +p.dataset.i; acceptPalette(); }
-  });
-  overlay.addEventListener('mousedown', e => { if (e.target === overlay) closePalette(); });
 }

@@ -1,10 +1,10 @@
 # Workbench Internals
 
-The workbench (`workbench.go`, `web/workbench.{html,css,js}`) is what `px0` serves when started without a target. It is a supervisor and reverse proxy, not a multi-workspace server: every directory or pull request it opens runs as a separate child px0.
+The workbench (`workbench.go`, `web/workbench.html`, `web/src/workbench/main.js`, `web/src/css/workbench.css`) is what `px0` serves when started without a target. It is a supervisor and reverse proxy, not a multi-workspace server: every directory or pull request it opens runs as a separate child px0.
 
 ## Why child processes
 
-`Server` is built around a single workspace: one `Index`, `lspManager`, `agentManager`, `prSession`, `GitWatcher` and `diffBase`, all fixed in `main()`. Rather than threading a workspace ID through every handler, the workbench re-runs the px0 binary per workspace. Each child keeps px0's single-workspace performance, a crashing or memory-hungry language server only takes down its own child, and stopping a child frees everything it held.
+`Server` is built around a single workspace: one `Index`, `lspManager`, `prSession`, `GitWatcher` and `diffBase`, all fixed in `main()`. Rather than threading a workspace ID through every handler, the workbench re-runs the px0 binary per workspace. Each child keeps px0's single-workspace performance, a crashing or memory-hungry language server only takes down its own child, and stopping a child frees everything it held.
 
 ```mermaid
 flowchart LR
@@ -43,13 +43,23 @@ Every PR is a worktree of one local clone per repository; nothing is cloned per 
 
 ## Proxy
 
-`/w/<id>/…` goes to the child's `httputil.ReverseProxy`, which has `FlushInterval: -1` so event streams are not buffered. The proxy keeps the browser's `Host` header (`pr.Out.Host = pr.In.Host`), so the child's `localPost` check, which compares `Host` with `Origin`, still passes. The child serves under its own base path, and its `/api/meta` reports `workbench`, the workbench's base path. The frontend uses it for the back link and to send **Git: Open Pull Request…** to `/api/wb/open` instead of `/api/pr/launch`.
+`/w/<id>/…` goes to the child's `httputil.ReverseProxy`, which has `FlushInterval: -1` so event streams are not buffered. The proxy keeps the browser's `Host` header (`pr.Out.Host = pr.In.Host`), so the child's `localPost` check, which compares `Host` with `Origin`, still passes. The child serves under its own base path, and its `/api/meta` reports `workbench`, the workbench's base path. The editor (`web/src/api.js`'s `inWorkbench`/`wbURL`) uses it for the title bar's link back to the workbench, **File > Open Workbench**, and the Repositories view and `Alt+O` switcher (`web/src/repos.js`), which call the workbench's `/api/wb/state`, `/api/wb/repos`, `/api/wb/repostatus` and `/api/wb/open` on the same origin.
 
 If the child is not running, a GET of the workspace page itself (`/w/<id>/`) starts it and returns a holding page. The page refreshes every second until the child is ready, or shows the error. Other paths return 503. This is why a bookmarked or reloaded workspace reopens, and why the workbench page can use plain links for known items.
 
 ## Page
 
-`web/workbench.html` is driven by `web/src/workbench.js`, a second bundle entry in `scripts/build-web.js` (output `web/workbench.js`, gitignored like `app.js`). It imports only `state.js`, `theme.js` and `metricsview.js`. `metricsview.js` holds the status bar's metrics chip and menu, moved out of `status.js` so both pages share them. The menu lists `parts` when a payload has them. The workbench's `/api/metrics` sums its own process with each running child's `/api/metrics`, fetched directly rather than through the proxy so the polling does not count against idle stop, and returns the parts for the menu. `/api/settings` on the workbench only accepts `workbench.colorTheme`, which `theme.js`'s `setTheme` posts. `/api/wb/complete?q=` lists folders whose names start with `q`'s last path element (case-insensitive), spelled the way `q` spells its parent (`~/`, relative) so the input does not jump.
+`web/workbench.html` loads `static/dist/workbench.js` and `workbench.css`, built by `scripts/build-web.js` from [`web/src/workbench/main.js`](../../web/src/workbench/main.js), a second bundle entry. The page imports only `util.js`, `theme.js` and `quickinput.js` (for the theme picker) from the editor's modules, not Monaco. It is laid out like VS Code's Welcome page: **Start** (the path / PR URL box with folder completion, the clone prompt for a PR without a known clone, and **Open \<cwd\>**), **Recent**, **Browse**, and **Repositories**, with a title bar holding the theme picker and a status bar with the version, the number of running workspaces and the summed CPU and memory.
+
+The status bar's metrics come from the workbench's `/api/metrics`, which sums its own process with each running child's `/api/metrics`, fetched directly rather than through the proxy so the polling does not count against idle stop, and returns the parts; the page shows them as the tooltip. `/api/settings` on the workbench only accepts `workbench.colorTheme`, which `theme.js`'s `setTheme` posts. `/api/wb/complete?q=` lists folders whose names start with `q`'s last path element (case-insensitive), spelled the way `q` spells its parent (`~/`, relative) so the input does not jump. Repository rows read their status lazily from `/api/wb/repostatus` as they scroll into view.
+
+## Inside a workspace
+
+`web/src/repos.js` gives every workbench child a way to move between repositories without going back to the page:
+
+- `listRepositories()` merges `/api/wb/state` (recently opened, with running state, the current one marked) and `/api/wb/repos` (every repository found), de-duplicated by item ID.
+- `openInWorkbench({target} | {id}, newTab)` posts `/api/wb/open` and navigates to the returned `/w/<id>/`. For a new tab it opens the tab synchronously first (so the popup blocker allows it) and points it at the result. A PR whose repository has no known clone goes to the workbench page with `?open=<url>`, which asks for one.
+- The **Repositories** view (activity bar) and **Switch Repository...** (`Alt+O`, the status bar's workspace item) use these. The view fetches `/api/wb/repostatus` for visible rows, four at a time.
 
 ## Item IDs
 

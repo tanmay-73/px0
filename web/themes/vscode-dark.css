@@ -1,0 +1,48 @@
+/* VS Code Dark Modern surfaces and Dark+ syntax colours.
+   Palette reference: microsoft/vscode/extensions/theme-defaults/themes. */
+:root[data-theme="vscode-dark"] {
+  --theme-name: "Dark Modern";
+  color-scheme: dark;
+  --bg: #1f1f1f; --bg2: #181818; --bg3: #2b2b2b; --bg4: #3c3c3c;
+  --fg: #cccccc; --dim: #9d9d9d; --faint: #868686;
+  --line: #2b2b2b; --accent: #0078d4; --accent-fg: #4daafc; --on-accent: #ffffff;
+  --sel: #264f78; --mark: #bb800966; --mark-active: #e2c08d; --cur: #ffffff0a;
+  --shadow: 0 2px 8px #0000005c;
+  --line-number: #6e7681; --cursor: #aeafad; --comment-style: normal;
+  --k: #569cd6; --kt: #4ec9b0; --nf: #dcdcaa; --nc: #4ec9b0; --nb: #4ec9b0;
+  --nv: #9cdcfe; --no: #4fc1ff; --na: #9cdcfe; --nt: #569cd6; --nd: #dcdcaa;
+  --np: #9cdcfe; --s: #ce9178; --m: #b5cea8; --o: #d4d4d4; --p: #d4d4d4;
+  --c: #6a9955; --cp: #c586c0; --err: #f85149;
+  --gi: #2ea043; --gd: #f85149;
+  --gi-bg: #9ccc2c1a; --gd-bg: #ff000033;
+
+  --shell: #181818; --card-border: #2b2b2b; --sidebar-bg: #181818; --panel-bg: #181818; --editor-bg: #1f1f1f;
+  --tab-strip: #2b2b2b; --tab-hover: #2a2d2e; --active-fg: #ffffff; --tab-active-fg: #ffffff; --tab-inactive-fg: #9d9d9d;
+  --icon-fg: #cccccc; --title-fg: #cccccc; --status-fg: #cccccc; --status-hover: #f1f1f133;
+  --focus: #0078d4; --sash: #0078d4; --highlight-fg: #2aaaff;
+  --list-hover: #2a2d2e; --list-active: #04395e; --list-selection: #37373d; --list-active-fg: #ffffff;
+  --toolbar-hover: #5a5d5e50; --activity-fg: #d7d7d7; --activity-muted: #868686; --activity-active-bg: #ffffff21;
+  --badge-bg: #616161; --badge-fg: #f8f8f8;
+  --button-bg: #0078d4; --button-fg: #ffffff; --button-hover: #026ec1; --button-border: #ffffff12;
+  --button2-bg: #313131; --button2-fg: #cccccc; --button2-hover: #3c3c3c; --button2-border: #ffffff12;
+  --input-bg: #313131; --input-border: #3c3c3c; --input-placeholder: #989898;
+  --option-active-bg: #2489db82; --option-active-border: #2488db;
+  --widget-bg: #202020; --widget-border: #313131; --quick-input-bg: #222222;
+  --menu-bg: #1f1f1f; --menu-border: #454545; --menu-sep: #454545; --menu-hover: #0078d4; --menu-focus-border: #0078d4;
+  --qi-focus-bg: #04395e; --qi-focus-fg: #ffffff;
+  --kb-bg: #8080802b; --kb-border: #33333399; --kb-bottom: #44444499; --kb-fg: #cccccc; --kb-shadow: #0000005c;
+  --command-bg: #ffffff0d; --command-border: #cccccc33; --command-hover-bg: #ffffff14; --command-hover-border: #cccccc4d;
+  --scrollbar: #79797966; --scrollbar-hover: #646464b3; --scrollbar-active: #bfbfbf66;
+  --letterpress: #151515; --desc-fg: #9d9d9d; --disabled-fg: #cccccc80;
+  --warn: #cca700; --info: #3794ff; --error-icon: #f14c4c;
+  --git-modified: #e2c08d; --git-added: #81b88b; --git-untracked: #73c991; --git-deleted: #c74e39;
+  --git-conflict: #e4676b; --git-renamed: #73c991; --git-ignored: #8c8c8c;
+  --code-bg: #2b2b2b; --quote-bg: #2b2b2b; --quote-border: #616161;
+
+  --editor-fg: #cccccc; --line-number-active: #cccccc;
+  --gutter-added: #2ea043; --gutter-modified: #0078d4; --gutter-deleted: #f85149;
+  --diff-ins-text: #9ccc2c33; --diff-del-text: #ff000033; --diff-ins-line: #9bb95533; --diff-del-line: #ff000033;
+  --find-match: #9e6a03; --find-match-hl: #ea5c0055; --word-hl: #575757b8; --sel-hl: #add6ff26; --sel-inactive: #3a3d41;
+  --bracket-match: #0064001a; --indent-guide: #404040; --indent-guide-active: #707070;
+  --whitespace: #e3e4e229; --suggest-selected: #04395e;
+}

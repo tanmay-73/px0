@@ -1,65 +1,43 @@
-# Workspace Text & Regex Search
+# Workspace Search & Replace
 
-Workspace search provides full-repository text searching across all files in your project. Accessible via `Cmd/Ctrl+Shift+F`, it allows you to query literal text phrases or complex regular expressions across millions of lines of code with instant previews.
-
----
-
-## Overview & Core Purpose
-
-When investigating an unfamiliar codebase, tracing error strings, auditing security vulnerabilities, or auditing how a configuration flag is utilized across services, searching file names alone is insufficient. Developers need to search through the entire workspace content at blazing speed.
-
-Traditional IDEs often struggle with whole-workspace text scans, stalling the UI or spinning up CPU fans as they churn through gigabytes of code. px0 provides multi-threaded parallel grep capability that queries tens of thousands of files in tens of milliseconds without causing browser stutters or high memory consumption. Results are cleanly grouped by file in the right-hand Inspector pane, providing line numbers, occurrence counts, and contextual snippets.
+The Search view (`Ctrl/Cmd+Shift+F`, or **Edit > Find in Files**) searches every file in the workspace. The server greps the indexed files in parallel on all cores, so a search across a large repository answers in tens of milliseconds.
 
 ---
 
-## Key Capabilities
+## Searching
 
-- **Parallel Multi-Core Grep**: Utilizes all available CPU cores on the host machine to search across repository files concurrently. Searching the entire React, Django, or Kubernetes repository takes only 25–85 milliseconds.
-- **Literal & Regular Expression Support**: Supports exact string matching as well as full Go/PCRE-compatible regular expressions for matching complex code patterns, IP addresses, function declarations, and identifier conventions.
-- **Smart Case Sensitivity**: When enabled (default), searching with all lowercase letters performs a case-insensitive search (e.g., `error` matches `Error`, `ERROR`, and `error`). Introducing any uppercase character (e.g., `ErrNotFound`) automatically switches to case-sensitive matching.
-- **Structured File Grouping**: Matches are organized hierarchically by file path in the right Inspector panel. Clicking any file header expands or collapses its matches.
-- **Contextual Snippet Elision**: Each match displays a contextual code snippet with the matching phrase highlighted. Long lines are intelligently elided around the match so you can immediately understand the surrounding code without scrolling horizontally.
-- **One-Click Navigation**: Clicking any snippet immediately opens the target file in the viewer, positions the caret at the matching row, and scrolls the line into the center of the screen.
+- Opening the view with text selected in the editor (on one line) searches for it.
+- Results update as you type (after a short pause) and when you press `Enter`.
+- Toggles in the search box: **Match Case**, **Match Whole Word** and **Use Regular Expression** (Go regular expression syntax). They are remembered.
+- **Toggle Search Details** (`...`) shows **files to include**: comma-separated globs such as `*.go, src/**`. **Find in Folder...** in the explorer's context menu fills it in for that folder.
+- Results are grouped by file, with the match count and the matching line, the match highlighted. Click a file row to collapse it; **Collapse All** and **Clear Search Results** are in the summary row; **Dismiss** (`×`) removes one file from the results.
+- Click a match to open the file in a preview tab with the match selected; double-click to keep the tab.
+- Files ignored by `.gitignore` are not searched. Results are capped; the summary adds "(more not shown)" when they were.
+- Saving a file re-runs the current search.
 
----
+## Replacing
 
-## Developer Workflows & Practical Value
+1. Click the chevron left of the search box to show the **Replace** box.
+2. Type the replacement. With **Use Regular Expression** on, `$1`, `$&` and the like refer to the match, as in VS Code.
+3. **Replace All** (or `Ctrl/Cmd+Enter` in the Replace box) asks for confirmation, then replaces in every file in the results. **Replace All in File** on a file row does just that file.
 
-### Auditing Symbol Call Sites
-Before refactoring a public API or modifying an exported function, you can search for the symbol name across the repository to verify every caller, mock, and test case that references it.
+Replacing edits each file's document, the same one an open editor shows, so it can be undone there. Files that had no unsaved changes are saved straight away; files with unsaved edits get the replacement as another unsaved edit.
 
-### Hunting Down Error Messages
-When an application logs a specific error string (such as `connection refused on port 5432` or `unexpected EOF in header`), pasting that string into workspace search instantly pinpoints the exact line where the error was thrown.
+## In-file find
 
-### Pattern Matching with Regular Expressions
-Using regex syntax, you can audit code patterns across the entire project. For example:
-- `func\s+\(.*\)\s+Handle\w+` to discover all Go HTTP handler methods.
-- `TODO\(.*?\):` or `FIXME` to review pending work across teams.
-- `api/v[0-9]+/` to find all versioned API endpoints.
+Find and replace within one file is Monaco's: `Ctrl/Cmd+F`, and `Ctrl+H` (`Cmd+Alt+F` on macOS), with the same case, whole-word and regex toggles, find in selection, and match highlighting in the scrollbar.
 
 ---
 
-## Interactive Controls & Search Pane
+## Keys
 
-1. Press **`Cmd/Ctrl+Shift+F`** to reveal the right-hand Inspector and focus the search input field.
-2. Enter your query or regex pattern and press `Enter`.
-3. As results stream in, the Inspector header displays the total match count and the number of affected files.
-4. Click any result snippet to open the corresponding file at that line.
-5. Use the collapsible chevron next to each file header to collapse files you have already reviewed.
-6. Press `Esc` or click the close button to dismiss the Inspector panel.
+| Key | Context | Action |
+| :--- | :--- | :--- |
+| `Ctrl/Cmd+Shift+F` | Anywhere | Show Search (with the selection as the query) |
+| `Enter` | Search box | Search now |
+| `Ctrl/Cmd+Enter` | Replace box | Replace All |
+| `Ctrl/Cmd+F`, `Ctrl+H` / `Cmd+Alt+F` | Editor | Find / replace in the file |
 
----
+## Endpoint
 
-## Configuration & Tuning
-
-Workspace search behavior can be customized in Settings (`Cmd/Ctrl+,`):
-
-- **Search: Smart Case** (`search.smartCase`): Toggle automatic smart casing (defaults to `true`).
-- **Search: Max Results** (`search.maxResults`): Adjust the maximum number of results returned (defaults to `1000`, configurable from `50` to `10,000`).
-- **Files: Exclude** (`files.exclude`): Exclude specific directories, build outputs, or generated bundles from search results using standard glob syntax.
-
----
-
-## Technical Architecture Deep Dive
-
-For details on the worker pool architecture, buffer reuse mechanisms, whole-file pre-filtering, and snippet elision algorithms, see [Workspace Search & Parallel Grep Internals](../internals/workspace-search.md).
+`GET /api/search?q=&re=1&case=1&word=1&glob=` returns matches grouped by file, each with its line number and the line split into the text before, in and after the match. For the worker pool, buffer reuse and snippet elision behind it, see [Workspace Search Internals](../internals/workspace-search.md).

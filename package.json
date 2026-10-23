@@ -3,11 +3,21 @@
   "version": "0.1.16",
   "type": "module",
   "private": true,
-  "description": "High-performance code reader and review engine",
+  "description": "Browser-based code editor with git, built on Monaco",
   "scripts": {
     "build": "node ./scripts/build-web.js",
     "build-web": "node ./scripts/build-web.js",
     "check": "node ./scripts/check-web.js",
     "test": "bun test web/src/"
+  },
+  "devDependencies": {
+    "@vscode/codicons": "0.0.46-24",
+    "@xterm/addon-fit": "0.11.0",
+    "@xterm/addon-search": "0.16.0",
+    "@xterm/addon-unicode11": "0.9.0",
+    "@xterm/addon-web-links": "0.12.0",
+    "@xterm/addon-webgl": "0.19.0",
+    "@xterm/xterm": "6.0.0",
+    "monaco-editor": "0.57.0"
   }
 }

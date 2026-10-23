@@ -29,6 +29,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"px0/internal/fuzzy"
 	"px0/internal/metrics"
@@ -36,13 +37,11 @@ import (
 	"px0/internal/settings"
 	"px0/internal/symbols"
 	"px0/internal/table"
-	"px0/internal/telemetry"
 	"px0/internal/ui"
 )
 
-//go:embed web/index.html web/style.css web/themes web/vendor
-//go:embed web/workbench.html web/workbench.css web/workbench.js
-//go:embed web/app.js
+// web/dist is the frontend bundled by scripts/build-web.js (`make web`).
+//go:embed web/index.html web/workbench.html web/themes web/vendor web/dist
 var embedded embed.FS
 
 // assets is the embedded web/ directory.
@@ -68,12 +67,9 @@ func cleanBasePath(p string) string {
 type Server struct {
 	ix        *Index
 	lsp       *lspManager
-	tel       *telemetry.Service // nil in tests; Track is nil-safe
-	agent     *agentManager      // nil unless main wires editing for this session
-	threads   *threadManager    // nil unless editing is wired: threads run on the same harness
-	pr        *prSession        // nil unless main launched this process as `px0 pr ...`
-	diffBase  string            // ref /api/diff and /api/gutter diff against; "HEAD" unless in PR mode
-	prHeadSHA string            // PR mode only: the checked-out PR head commit. Frozen boundary between
+	pr        *prSession // nil unless main launched this process as `px0 pr ...`
+	diffBase  string     // ref /api/diff and /api/gutter diff against; "HEAD" unless in PR mode
+	prHeadSHA string     // PR mode only: the checked-out PR head commit. Frozen boundary between
 	// the PR's own diff (diffBase..prHeadSHA) and the reviewer's local edits
 	// since checkout (prHeadSHA..working tree); refreshed on Pull.
 	gitWatcher *GitWatcher
@@ -82,6 +78,8 @@ type Server struct {
 	session    *sessionManager
 
 	workbenchURL string // the workbench's base path, when this px0 is one of its workspaces
+
+	terms *termManager // integrated terminals (terminal.go); off until SetTerminalPolicy
 
 	lastReq atomic.Int64 // unix nanos of the most recent request
 
@@ -101,6 +99,15 @@ func (s *Server) EndStreams() {
 		}
 	})
 }
+
+// SetTerminalPolicy turns the integrated terminal on or off (reason says why
+// it is off). See terminalPolicy.
+func (s *Server) SetTerminalPolicy(enabled bool, reason string) {
+	s.terms.enabled, s.terms.reason = enabled, reason
+}
+
+// CloseTerminals ends every terminal's shell; call it when px0 stops.
+func (s *Server) CloseTerminals() { s.terms.closeAll() }
 
 // BasePath returns the URL path prefix configured for this server (e.g. "/" or "/rev-123/").
 func (s *Server) BasePath() string {
@@ -151,8 +158,12 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc(s.routePath("/api/file"), s.handleFile)
 	s.mux.HandleFunc(s.routePath("/api/close"), s.handleClose)
 	s.mux.HandleFunc(s.routePath("/api/raw"), s.handleRaw)
+	s.mux.HandleFunc(s.routePath("/api/file/text"), s.handleFileText)
 	s.mux.HandleFunc(s.routePath("/api/file/save"), s.handleFileSave)
+	s.mux.HandleFunc(s.routePath("/api/file/stat"), s.handleFileStat)
 	s.mux.HandleFunc(s.routePath("/api/fs/new"), s.handleFSNew)
+	s.mux.HandleFunc(s.routePath("/api/fs/rename"), s.handleFSRename)
+	s.mux.HandleFunc(s.routePath("/api/fs/delete"), s.handleFSDelete)
 	s.mux.HandleFunc(s.routePath("/api/markdown"), s.handleMarkdown)
 	s.mux.HandleFunc(s.routePath("/api/table"), s.handleTable)
 	s.mux.HandleFunc(s.routePath("/api/diff"), s.handleDiff)
@@ -160,14 +171,15 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc(s.routePath("/api/stream"), s.handleEventStream)
 	s.mux.HandleFunc(s.routePath("/api/git/stream"), s.handleEventStream)
 	s.mux.HandleFunc(s.routePath("/api/git/refresh"), s.handleGitRefresh)
+	s.mux.HandleFunc(s.routePath("/api/git/status"), s.handleGitStatus)
+	s.mux.HandleFunc(s.routePath("/api/git/show"), s.handleGitShow)
 	s.mux.HandleFunc(s.routePath("/api/git/stage"), s.handleGitStage)
 	s.mux.HandleFunc(s.routePath("/api/git/unstage"), s.handleGitUnstage)
+	s.mux.HandleFunc(s.routePath("/api/git/discard"), s.handleGitDiscard)
 	s.mux.HandleFunc(s.routePath("/api/git/hunk"), s.handleGitHunk)
 	s.mux.HandleFunc(s.routePath("/api/git/commit"), s.handleGitCommit)
-	s.mux.HandleFunc(s.routePath("/api/git/commit-message"), s.handleGitCommitMessage)
 	s.mux.HandleFunc(s.routePath("/api/git/push"), s.handleGitPush)
 	s.mux.HandleFunc(s.routePath("/api/git/pull"), s.handleGitPull)
-	s.mux.HandleFunc(s.routePath("/api/git/sync-agent"), s.handleGitSyncAgent)
 	s.mux.HandleFunc(s.routePath("/api/git/sync-state"), s.handleGitSyncState)
 	s.mux.HandleFunc(s.routePath("/api/git/abort"), s.handleGitAbort)
 	s.mux.HandleFunc(s.routePath("/api/git/log"), s.handleGitLog)
@@ -190,22 +202,12 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc(s.routePath("/api/lsp/start"), s.handleLSPStart)
 	s.mux.HandleFunc(s.routePath("/api/lsp/stop"), s.handleLSPStop)
 	s.mux.HandleFunc(s.routePath("/api/lsp/servers"), s.handleLSPServers)
-	s.mux.HandleFunc(s.routePath("/api/agent/harnesses"), s.handleAgentHarnesses)
-	s.mux.HandleFunc(s.routePath("/api/agent/select"), s.handleAgentSelect)
-	s.mux.HandleFunc(s.routePath("/api/agent/edit"), s.handleAgentEdit)
-	s.mux.HandleFunc(s.routePath("/api/agent/batch"), s.handleAgentBatchEdit)
-	s.mux.HandleFunc(s.routePath("/api/agent/job"), s.handleAgentJob)
-	s.mux.HandleFunc(s.routePath("/api/agent/cancel"), s.handleAgentCancel)
-	s.mux.HandleFunc(s.routePath("/api/threads"), s.handleThreads)
-	s.mux.HandleFunc(s.routePath("/api/threads/get"), s.handleThreadGet)
-	s.mux.HandleFunc(s.routePath("/api/threads/create"), s.handleThreadCreate)
-	s.mux.HandleFunc(s.routePath("/api/threads/send"), s.handleThreadSend)
-	s.mux.HandleFunc(s.routePath("/api/threads/cancel"), s.handleThreadCancel)
-	s.mux.HandleFunc(s.routePath("/api/threads/scope"), s.handleThreadScope)
-	s.mux.HandleFunc(s.routePath("/api/threads/delete"), s.handleThreadDelete)
-	s.mux.HandleFunc(s.routePath("/api/threads/revert"), s.handleThreadRevert)
-	s.mux.HandleFunc(s.routePath("/api/threads/stream"), s.handleThreadStream)
 	s.mux.HandleFunc(s.routePath("/api/settings"), s.handleSettings)
+	s.mux.HandleFunc(s.routePath("/api/terminal/list"), s.handleTerminalList)
+	s.mux.HandleFunc(s.routePath("/api/terminal/new"), s.handleTerminalNew)
+	s.mux.HandleFunc(s.routePath("/api/terminal/kill"), s.handleTerminalKill)
+	s.mux.HandleFunc(s.routePath("/api/terminal/rename"), s.handleTerminalRename)
+	s.mux.HandleFunc(s.routePath("/api/terminal/ws"), s.handleTerminalSocket)
 	s.mux.HandleFunc(s.routePath("/api/pr/meta"), s.handlePRMeta)
 	s.mux.HandleFunc(s.routePath("/api/pr/comments"), s.handlePRComments)
 	s.mux.HandleFunc(s.routePath("/api/pr/comments/delete"), s.handlePRCommentDelete)
@@ -216,7 +218,6 @@ func (s *Server) registerRoutes() {
 	s.mux.HandleFunc(s.routePath("/api/pr/comments/review-reply"), s.handlePRReviewCommentReply)
 	s.mux.HandleFunc(s.routePath("/api/pr/merge-status"), s.handlePRMergeStatus)
 	s.mux.HandleFunc(s.routePath("/api/pr/merge"), s.handlePRMerge)
-	s.mux.HandleFunc(s.routePath("/api/pr/merge-message"), s.handlePRMergeMessage)
 	s.mux.HandleFunc(s.routePath("/api/forge/connect"), s.handleForgeConnect)
 	s.mux.HandleFunc(s.routePath("/api/session"), s.handleSession)
 }
@@ -232,6 +233,7 @@ func NewServer(ix *Index, lsp *lspManager, basePaths ...string) *Server {
 		bp = cleanBasePath(basePaths[0])
 	}
 	s := &Server{ix: ix, lsp: lsp, diffBase: "HEAD", basePath: bp, mux: http.NewServeMux(), streamsDone: make(chan struct{})}
+	s.terms = newTermManager(ix.Root(), false, "The terminal is not enabled.")
 	s.session = newSessionManager(s.basePath, ix.Root())
 	s.gitWatcher = NewGitWatcher(ix)
 	s.gitWatcher.Start(context.Background())
@@ -278,6 +280,8 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	gitStreamPath := s.routePath("/api/git/stream")
 	metricsPath := s.routePath("/api/metrics")
 	isSSE := r.URL.Path == streamPath || r.URL.Path == gitStreamPath || r.Header.Get("Accept") == "text/event-stream"
+	// A WebSocket handshake hijacks the connection; it must not be gzipped.
+	isUpgrade := strings.EqualFold(r.Header.Get("Upgrade"), "websocket")
 	if r.URL.Path != metricsPath && !isSSE {
 		s.lastReq.Store(time.Now().UnixNano())
 	}
@@ -314,7 +318,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	var out http.ResponseWriter = rec
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Content-Security-Policy", contentSecurityPolicy)
-	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") && !isSSE {
+	if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") && !isSSE && !isUpgrade {
 		w.Header().Set("Content-Encoding", "gzip")
 		w.Header().Add("Vary", "Accept-Encoding")
 		gz := gzipPool.Get().(*gzip.Writer)
@@ -494,126 +498,11 @@ func fail(w http.ResponseWriter, code int, msg string) {
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
-// SetAgent makes editing through a coding harness available. Unavailable
-// unless main wires it; available still means nothing runs until a harness is
-// picked, in the UI or with -agent.
-func (s *Server) SetAgent(a *agentManager) {
-	s.agent = a
-	if a != nil {
-		s.threads = newThreadManager(a, s.ix.Root())
-		s.threads.prContext = s.prThreadContext
-		a.onEdit = func() {
-			if s.gitWatcher != nil {
-				s.gitWatcher.Trigger()
-			}
-		}
-	}
-}
-
-// diffFileMax caps the diff file handed to a thread; past it the harness is
-// pointed at the git command instead.
-const diffFileMax = 2 << 20
-
-// prThreadContext tells a coding harness what a PR-review thread is about. A PR
-// checkout is a plain worktree whose recent history is the PR's commits followed
-// by the reviewer's own, so a harness asked about "the PR" left to itself looks
-// at the last commit. Each scope names an exact range instead, and gets the
-// matching diff as a file so a big change doesn't have to be re-derived:
-//
-//	pr        the whole pull request: merge-base..PR head
-//	mine      the reviewer's own work on top: PR head..working tree
-//	selection just the anchored code; the PR is background
-//
-// An unset scope means the whole PR. Empty outside PR review.
-func (s *Server) prThreadContext(scope string) string {
-	p := s.pr
-	if p == nil {
-		return ""
-	}
-	p.mu.Lock()
-	num, title, base, head := p.meta.Number, p.meta.Title, p.meta.BaseRef, p.meta.HeadRef
-	mb, headSHA, url := p.diffBase, p.meta.HeadSHA, p.target.URL
-	p.mu.Unlock()
-	root := s.ix.Root()
-	short := func(x string) string { return x[:min(12, len(x))] }
-	haveRange := mb != "" && mb != "HEAD" && headSHA != ""
-	if scope == "" {
-		scope = "pr"
-	}
-
-	var b strings.Builder
-	fmt.Fprintf(&b, "This workspace is a checkout of pull request #%d %q (%s ← %s)", num, title, base, head)
-	if url != "" {
-		fmt.Fprintf(&b, ", %s", url)
-	}
-	b.WriteString(". ")
-
-	prRange := ""
-	if haveRange {
-		prRange = fmt.Sprintf("`git diff %s %s` (merge-base with %s to the PR head %s)", mb, headSHA, base, short(headSHA))
-	}
-	switch scope {
-	case "mine":
-		fmt.Fprintf(&b, "The user is asking about their OWN changes on top of the PR, not the PR itself. ")
-		if headSHA == "" {
-			b.WriteString("Look at `git status` and `git log` for them.")
-			break
-		}
-		fmt.Fprintf(&b, "Those are exactly `git diff %s` (working tree against the PR head, staged and unstaged) and `git log --stat %s..HEAD` (their commits)", headSHA, headSHA)
-		if un := gitUntracked(root); len(un) > 0 {
-			if len(un) > 40 {
-				un = append(un[:40], fmt.Sprintf("(+%d more)", len(un)-40))
-			}
-			fmt.Fprintf(&b, ", plus untracked files: %s", strings.Join(un, ", "))
-		}
-		b.WriteString(". ")
-		if f := p.writeScopeFile("your-changes.diff", gitDiffFull(root, diffFileMax, headSHA)); f != "" {
-			fmt.Fprintf(&b, "That diff is also saved at %s. ", f)
-		}
-		if prRange != "" {
-			fmt.Fprintf(&b, "The PR's own change (%s) is background only; do not review it unless asked.", prRange)
-		}
-	case "selection":
-		b.WriteString("The user is asking about the code they anchored this conversation to; the rest of the PR is background")
-		if prRange != "" {
-			fmt.Fprintf(&b, " (%s shows it if you need it)", prRange)
-		}
-		b.WriteString(".")
-	default: // "pr"
-		b.WriteString("When the user says \"the PR\" or \"this PR\", they mean the entire pull request, not the latest commit or the file they are looking at.")
-		if !haveRange {
-			break
-		}
-		fmt.Fprintf(&b, " The PR is exactly %s: read it with that and `git log --stat %s..%s`; do not review from `git show HEAD` or `git diff HEAD~1`.", prRange, mb, headSHA)
-		if f := p.writeScopeFile("pr.diff", gitDiffFull(root, diffFileMax, mb, headSHA)); f != "" {
-			fmt.Fprintf(&b, " The full diff is also saved at %s.", f)
-		}
-		if files := s.ix.PRFiles(); len(files) > 0 {
-			names := make([]string, 0, len(files))
-			for f, st := range files {
-				names = append(names, st+" "+f)
-			}
-			sort.Strings(names)
-			more := ""
-			if len(names) > 60 {
-				more = fmt.Sprintf(" (+%d more)", len(names)-60)
-				names = names[:60]
-			}
-			fmt.Fprintf(&b, " Files it changes (%d)%s: %s.", len(files), more, strings.Join(names, ", "))
-		}
-		fmt.Fprintf(&b, " Anything after %s (`git diff %s`, or commits above it) is the reviewer's own work on top of the PR, not part of it.", short(headSHA), headSHA)
-	}
-	return b.String()
-}
-
 // SetPR marks this process as a PR review session: diffs are computed
 // against the PR's merge-base instead of HEAD, and the /api/pr/* endpoints
 // become live. Unset (nil) for a normal workspace.
 func (s *Server) SetPR(p *prSession) {
 	s.pr = p
-	if s.threads != nil {
-		s.threads.prContext = s.prThreadContext
-	}
 	if p != nil {
 		s.diffBase = p.diffBase
 		s.prHeadSHA = p.meta.HeadSHA
@@ -927,25 +816,23 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	}
 	gitCount, gitFiles := s.ix.GitChanges()
 	meta := map[string]any{
-		"root":        s.ix.Root(),
-		"name":        filepath.Base(s.ix.Root()),
-		"files":       n,
-		"indexMs":     ms,
-		"builtAt":     at,
-		"ready":       s.ix.Ready(),
-		"git":         inGit,
-		"gitChanges":  gitCount,
-		"gitFiles":    gitFiles,
-		"forge":       s.forgeMeta(),
-		"lspServers":  s.lsp.Available(),
-		"metrics":     getProcessMetrics(s.lsp),
-		"version":     version,
-		"basePath":    s.BasePath(),
-		"workbench":   s.workbenchURL,
-		"agent":       s.agent.Name(),
-		"agentModel":  s.agent.Model(),
-		"agentPinned": s.agent.Pinned(),
-		"agents":      []agentHarness{},
+		"root":       s.ix.Root(),
+		"name":       filepath.Base(s.ix.Root()),
+		"files":      n,
+		"indexMs":    ms,
+		"builtAt":    at,
+		"ready":      s.ix.Ready(),
+		"git":        inGit,
+		"gitChanges": gitCount,
+		"gitFiles":   gitFiles,
+		"forge":      s.forgeMeta(),
+		"lspServers": s.lsp.Available(),
+		"metrics":    getProcessMetrics(s.lsp),
+		"version":    version,
+		"basePath":   s.BasePath(),
+		"workbench":  s.workbenchURL,
+		"compare":    gitBinary(),
+		"terminal":   s.terms.enabled,
 	}
 	if s.pr != nil {
 		meta["pr"] = s.pr.metaMap(s.ix.PRFiles())
@@ -1199,6 +1086,13 @@ func (s *Server) handleTree(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		fail(w, 404, "not indexed: "+dir)
 		return
+	}
+	// Folders that are repositories of their own (nested clones, submodules)
+	// are marked, so the tree can offer to open them as a workspace.
+	for i := range kids {
+		if kids[i].Dir && hasGitMarker(filepath.Join(s.ix.Root(), filepath.FromSlash(kids[i].Path))) {
+			kids[i].Repo = true
+		}
 	}
 	writeJSON(w, map[string]any{"dir": dir, "children": kids})
 }
@@ -1480,14 +1374,89 @@ func (s *Server) handleRaw(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, abs)
 }
 
+// maxTextBytes caps what /api/file/text and /api/git/show hand an editor:
+// past it a file is reported tooLarge instead of shipped.
+const maxTextBytes = 20 << 20
+
+// fileText is what an editor opens: the file's exact bytes as a string (line
+// endings untouched, so saving it back round-trips), or a flag saying why not.
+type fileText struct {
+	Path     string `json:"path"`
+	Text     string `json:"text"`
+	Size     int64  `json:"size"`
+	Mtime    int64  `json:"mtime"` // unix milliseconds; hand back to /api/file/save
+	Binary   bool   `json:"binary"`
+	TooLarge bool   `json:"tooLarge"`
+	EOL      string `json:"eol"` // "\r\n" when the first line break is CRLF, else "\n"
+}
+
+// textOf fills in t's text from data, or marks it binary. Bytes that aren't
+// valid UTF-8 count as binary too: a JSON string can't carry them, so the
+// editor would be handed (and would save back) something else.
+func (t *fileText) textOf(data []byte) {
+	t.EOL = "\n"
+	if render.IsBinary(data) || !utf8.Valid(data) {
+		t.Binary = true
+		return
+	}
+	if i := bytes.IndexByte(data, '\n'); i > 0 && data[i-1] == '\r' {
+		t.EOL = "\r\n"
+	}
+	t.Text = string(data)
+}
+
+// handleFileText serves a file whole, for editing (GET ?path=).
+func (s *Server) handleFileText(w http.ResponseWriter, r *http.Request) {
+	abs, rel, ok := s.resolvePath(r.URL.Query().Get("path"))
+	if !ok || rel == "" {
+		fail(w, http.StatusBadRequest, "bad path")
+		return
+	}
+	f, err := os.Open(abs)
+	if err != nil {
+		fail(w, http.StatusNotFound, err.Error())
+		return
+	}
+	defer f.Close()
+	// Stat before reading: a write racing the read then leaves the mtime
+	// older than the text, so the next save reports a conflict rather than
+	// quietly overwriting what landed in between.
+	st, err := f.Stat()
+	if err != nil {
+		fail(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if st.IsDir() {
+		fail(w, http.StatusBadRequest, "is a directory")
+		return
+	}
+	t := fileText{Path: rel, Size: st.Size(), Mtime: st.ModTime().UnixMilli(), EOL: "\n"}
+	if st.Size() > maxTextBytes {
+		t.TooLarge = true
+		writeJSON(w, t)
+		return
+	}
+	data, err := io.ReadAll(f)
+	if err != nil {
+		fail(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	t.Size = int64(len(data))
+	t.textOf(data)
+	writeJSON(w, t)
+}
+
 type fileSaveRequest struct {
 	Path    string `json:"path"`
 	Content string `json:"content"`
+	// Mtime, when set, is the unix-millisecond mtime the editor loaded the
+	// file at. A file on disk with any other is refused (409) rather than
+	// overwritten: something else changed it since.
+	Mtime *int64 `json:"mtime"`
 }
 
 func (s *Server) handleFileSave(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		fail(w, http.StatusMethodNotAllowed, "method not allowed")
+	if !localPost(w, r) {
 		return
 	}
 	var req fileSaveRequest
@@ -1501,20 +1470,33 @@ func (s *Server) handleFileSave(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	st, statErr := os.Stat(abs)
+	if statErr == nil && st.IsDir() {
+		fail(w, http.StatusBadRequest, "target is a directory")
+		return
+	}
+	if statErr == nil && req.Mtime != nil && st.ModTime().UnixMilli() != *req.Mtime {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusConflict)
+		json.NewEncoder(w).Encode(map[string]any{
+			"error": "the file changed on disk", "conflict": true, "mtime": st.ModTime().UnixMilli(),
+		})
+		return
+	}
+
 	dir := filepath.Dir(abs)
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		fail(w, http.StatusInternalServerError, "failed to create directory: "+err.Error())
 		return
 	}
 
-	if st, err := os.Stat(abs); err == nil && st.IsDir() {
-		fail(w, http.StatusBadRequest, "target is a directory")
-		return
-	}
-
 	if err := os.WriteFile(abs, []byte(req.Content), 0o644); err != nil {
 		fail(w, http.StatusInternalServerError, "failed to write file: "+err.Error())
 		return
+	}
+	var mtime int64
+	if st, err := os.Stat(abs); err == nil {
+		mtime = st.ModTime().UnixMilli()
 	}
 
 	render.Evict(abs)
@@ -1525,13 +1507,63 @@ func (s *Server) handleFileSave(w http.ResponseWriter, r *http.Request) {
 	s.ix.TouchPath(rel)
 	if s.gitWatcher != nil {
 		s.gitWatcher.Trigger()
+		if os.IsNotExist(statErr) {
+			s.gitWatcher.NotifyTree()
+		}
 	}
 
 	writeJSON(w, map[string]any{
-		"ok":   true,
-		"path": rel,
-		"size": len(req.Content),
+		"ok":    true,
+		"path":  rel,
+		"size":  len(req.Content),
+		"mtime": mtime,
 	})
+}
+
+// maxStatPaths caps one /api/file/stat request.
+const maxStatPaths = 500
+
+type fileStat struct {
+	Exists bool  `json:"exists"`
+	Mtime  int64 `json:"mtime"` // unix milliseconds
+	Size   int64 `json:"size"`
+	Dir    bool  `json:"dir,omitempty"`
+}
+
+// handleFileStat reports whether each of a list of files exists and when it
+// last changed (POST {paths}), so an editor can notice open files changing
+// on disk under it. Results are keyed by the path as sent; paths outside the
+// workspace are left out, and so is everything past the first maxStatPaths.
+func (s *Server) handleFileStat(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		fail(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	var req struct {
+		Paths []string `json:"paths"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	truncated := len(req.Paths) > maxStatPaths
+	if truncated {
+		req.Paths = req.Paths[:maxStatPaths]
+	}
+	files := make(map[string]fileStat, len(req.Paths))
+	for _, p := range req.Paths {
+		abs, _, ok := s.resolvePath(p)
+		if !ok {
+			continue
+		}
+		st, err := os.Stat(abs)
+		if err != nil {
+			files[p] = fileStat{}
+			continue
+		}
+		files[p] = fileStat{Exists: true, Mtime: st.ModTime().UnixMilli(), Size: st.Size(), Dir: st.IsDir()}
+	}
+	writeJSON(w, map[string]any{"files": files, "truncated": truncated})
 }
 
 type fsNewRequest struct {
@@ -1540,8 +1572,7 @@ type fsNewRequest struct {
 }
 
 func (s *Server) handleFSNew(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		fail(w, http.StatusMethodNotAllowed, "method not allowed")
+	if !localPost(w, r) {
 		return
 	}
 	var req fsNewRequest
@@ -1581,6 +1612,7 @@ func (s *Server) handleFSNew(w http.ResponseWriter, r *http.Request) {
 	s.ix.TouchPath(rel)
 	if s.gitWatcher != nil {
 		s.gitWatcher.Trigger()
+		s.gitWatcher.NotifyTree()
 	}
 
 	writeJSON(w, map[string]any{
@@ -1588,6 +1620,137 @@ func (s *Server) handleFSNew(w http.ResponseWriter, r *http.Request) {
 		"path": rel,
 		"type": req.Type,
 	})
+}
+
+// editablePath is safePath for moving and deleting: never the workspace root
+// itself, and never anything in or under a .git directory, whose contents
+// only git should touch.
+func (s *Server) editablePath(p string) (abs, rel string, ok bool) {
+	abs, rel, ok = s.safePath(p)
+	if !ok || rel == "" {
+		return "", "", false
+	}
+	for _, seg := range strings.Split(rel, "/") {
+		if strings.EqualFold(seg, ".git") {
+			return "", "", false
+		}
+	}
+	return abs, rel, true
+}
+
+// treeChanged tells the caches keyed on a path that the files at rel -- one
+// file, or a whole folder -- were rewritten, appeared or went away on disk.
+// Follow a batch of them with one fsChanged.
+func (s *Server) treeChanged(abs, rel string, dir bool) {
+	if dir {
+		render.EvictAll()
+	} else {
+		render.Evict(abs)
+	}
+	if s.lsp != nil {
+		s.lsp.CloseDoc(abs, rel)
+	}
+	s.ix.TouchTree(rel)
+}
+
+// fsChanged follows treeChanged calls: language servers re-read the documents
+// they have open (closing those that no longer exist), git status is
+// refreshed, and, when the tree changed shape, its listeners are told.
+func (s *Server) fsChanged(tree bool) {
+	if s.lsp != nil {
+		s.lsp.RefreshOpenDocs()
+	}
+	if s.gitWatcher != nil {
+		s.gitWatcher.Trigger()
+		if tree {
+			s.gitWatcher.NotifyTree()
+		}
+	}
+}
+
+// handleFSRename moves a file or folder within the workspace (POST {from,
+// to}), creating to's missing parent folders. It never overwrites anything.
+func (s *Server) handleFSRename(w http.ResponseWriter, r *http.Request) {
+	if !localPost(w, r) {
+		return
+	}
+	var req struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	fromAbs, fromRel, ok1 := s.editablePath(req.From)
+	toAbs, toRel, ok2 := s.editablePath(req.To)
+	if !ok1 || !ok2 {
+		fail(w, http.StatusBadRequest, "bad path")
+		return
+	}
+	from, err := os.Lstat(fromAbs)
+	if err != nil {
+		fail(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if fromRel == toRel {
+		writeJSON(w, map[string]any{"ok": true, "path": toRel})
+		return
+	}
+	// On a case-insensitive disk "a.go" -> "A.go" finds the file itself at
+	// the destination; that is a rename, not a collision.
+	if to, err := os.Lstat(toAbs); err == nil && !(strings.EqualFold(fromRel, toRel) && os.SameFile(from, to)) {
+		fail(w, http.StatusConflict, "already exists: "+toRel)
+		return
+	}
+	if from.IsDir() && strings.HasPrefix(toRel, fromRel+"/") {
+		fail(w, http.StatusBadRequest, "cannot move a folder into itself")
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(toAbs), 0o755); err != nil {
+		fail(w, http.StatusInternalServerError, "failed to create parent directory: "+err.Error())
+		return
+	}
+	if err := os.Rename(fromAbs, toAbs); err != nil {
+		fail(w, http.StatusInternalServerError, "failed to rename: "+err.Error())
+		return
+	}
+	s.treeChanged(fromAbs, fromRel, from.IsDir())
+	s.treeChanged(toAbs, toRel, from.IsDir())
+	s.fsChanged(true)
+	writeJSON(w, map[string]any{"ok": true, "path": toRel})
+}
+
+// handleFSDelete deletes a file, or a folder and everything in it (POST
+// {path}).
+func (s *Server) handleFSDelete(w http.ResponseWriter, r *http.Request) {
+	if !localPost(w, r) {
+		return
+	}
+	var req struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&req); err != nil {
+		fail(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	abs, rel, ok := s.editablePath(req.Path)
+	if !ok {
+		fail(w, http.StatusBadRequest, "bad path")
+		return
+	}
+	st, err := os.Lstat(abs)
+	if err != nil {
+		fail(w, http.StatusNotFound, err.Error())
+		return
+	}
+	if err := os.RemoveAll(abs); err != nil {
+		fail(w, http.StatusInternalServerError, "failed to delete: "+err.Error())
+		return
+	}
+	s.treeChanged(abs, rel, st.IsDir())
+	s.fsChanged(true)
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 // handleDiff returns the unified diff of a file against HEAD. available is false
@@ -1601,9 +1764,15 @@ func (s *Server) handleFSNew(w http.ResponseWriter, r *http.Request) {
 // the frontend can label the two apart instead of showing one blended diff
 // that looks the same whether or not the reviewer has touched anything.
 func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
-	_, rel, ok := s.resolvePath(r.URL.Query().Get("path"))
+	abs, rel, ok := s.resolvePath(r.URL.Query().Get("path"))
 	if !ok {
 		fail(w, 400, "bad path")
+		return
+	}
+	// compare names a second file: the diff is from it to path, two files
+	// side by side rather than a file against git.
+	if other := r.URL.Query().Get("compare"); other != "" {
+		s.handleCompare(w, other, abs, rel)
 		return
 	}
 	// A ref names one local commit to read instead of the working tree: the
@@ -1653,6 +1822,42 @@ func (s *Server) handleDiff(w http.ResponseWriter, r *http.Request) {
 	}
 	resp["available"] = avail
 	writeJSON(w, resp)
+}
+
+// handleCompare diffs two files of the workspace, left (the original) to
+// right, the way an editor's "Compare with Selected" does. Neither needs to be
+// tracked, or even inside a repository: `git diff --no-index` only needs git.
+func (s *Server) handleCompare(w http.ResponseWriter, left, rightAbs, rightRel string) {
+	leftAbs, leftRel, ok := s.resolvePath(left)
+	if !ok {
+		fail(w, 400, "bad path")
+		return
+	}
+	for _, p := range []string{leftAbs, rightAbs} {
+		st, err := os.Stat(p)
+		if err != nil {
+			fail(w, 404, err.Error())
+			return
+		}
+		if st.IsDir() {
+			fail(w, 400, filepath.Base(p)+" is a directory")
+			return
+		}
+	}
+	diff, binary, err := diffFiles(leftAbs, rightAbs)
+	if err != nil {
+		fail(w, 503, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{
+		"path":      rightRel,
+		"compare":   leftRel,
+		"diff":      diff,
+		"hunks":     render.HighlightDiff(rightRel, diff),
+		"binary":    binary,
+		"identical": diff == "",
+		"available": true,
+	})
 }
 
 // handleGutter returns per-file changed-line ranges (new-file line numbers) for
@@ -1783,61 +1988,205 @@ func (s *Server) handleGitRefresh(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-func (s *Server) decodeGitPath(w http.ResponseWriter, r *http.Request) (rel string, ok bool) {
+// decodeGitPaths reads the files a git action applies to: {"path": p},
+// {"paths": [...]}, or, when all is allowed, {"all": true} for the whole
+// served root (returned as ""). Every path is workspace-relative.
+func (s *Server) decodeGitPaths(w http.ResponseWriter, r *http.Request, all bool) ([]string, bool) {
 	var body struct {
-		Path string `json:"path"`
+		Path  string   `json:"path"`
+		Paths []string `json:"paths"`
+		All   bool     `json:"all"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 4096)).Decode(&body); err != nil || body.Path == "" {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 4<<20)).Decode(&body); err != nil {
+		fail(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return nil, false
+	}
+	if body.All && all {
+		return []string{""}, true
+	}
+	raw := body.Paths
+	if body.Path != "" {
+		raw = append(raw, body.Path)
+	}
+	if len(raw) == 0 {
 		fail(w, http.StatusBadRequest, "path is required")
-		return "", false
+		return nil, false
 	}
-	_, rel, ok = s.safePath(body.Path)
-	if !ok {
-		fail(w, http.StatusBadRequest, "bad path")
-		return "", false
+	rels := make([]string, 0, len(raw))
+	for _, p := range raw {
+		_, rel, ok := s.safePath(p)
+		if !ok || (rel == "" && !all) {
+			fail(w, http.StatusBadRequest, "bad path: "+p)
+			return nil, false
+		}
+		rels = append(rels, rel)
 	}
-	return rel, true
+	return rels, true
 }
 
-// handleGitStage adds a file to the index (POST {path}).
-func (s *Server) handleGitStage(w http.ResponseWriter, r *http.Request) {
-	if !localPost(w, r) {
-		return
-	}
-	rel, ok := s.decodeGitPath(w, r)
-	if !ok {
-		return
-	}
-	if err := gitStage(s.ix.Root(), rel); err != nil {
-		fail(w, http.StatusBadGateway, err.Error())
-		return
-	}
+// gitChanged reports a git action's result the way stage always has: the
+// fresh status payload (also pushed to every listener), or just ok.
+func (s *Server) gitChanged(w http.ResponseWriter) {
 	if s.gitWatcher != nil {
-		payload := s.gitWatcher.Refresh()
-		writeJSON(w, payload)
+		writeJSON(w, s.gitWatcher.Refresh())
 		return
 	}
 	s.ix.UpdateGitStatus()
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-// handleGitUnstage removes a file from the index without touching the
-// working tree (POST {path}).
+// handleGitStatus serves the Source Control view: staged changes, working
+// tree changes, conflicts, and where the branch stands (GET).
+func (s *Server) handleGitStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		fail(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	rep := gitStatusReport(s.ix.Root())
+	if rep.Git && s.pr != nil {
+		// A PR checkout is a detached HEAD with no upstream of its own: it
+		// pushes to the PR's head branch, and is ahead by the commits made
+		// on top of what that branch holds.
+		s.pr.mu.Lock()
+		head, branch := s.pr.remoteHead(), s.pr.meta.HeadRef
+		s.pr.mu.Unlock()
+		rep.Upstream = branch
+		rep.Ahead, rep.Behind = gitCountSince(s.ix.Root(), head), 0
+	}
+	writeJSON(w, rep)
+}
+
+// handleGitShow serves one file as it is at a ref, for the left (or right)
+// side of a diff editor (GET ?path=&ref=). ref is HEAD (the default), INDEX
+// (what is staged), BASE (what /api/diff compares the working tree with: the
+// merge-base in a PR review, HEAD otherwise), a commit SHA, or a SHA with "^"
+// for its first parent. The file need not exist on disk; one missing at ref
+// is exists false, not an error.
+func (s *Server) handleGitShow(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	_, rel, ok := s.safePath(q.Get("path"))
+	if !ok || rel == "" {
+		fail(w, http.StatusBadRequest, "bad path")
+		return
+	}
+	ref := q.Get("ref")
+	if ref == "" {
+		ref = "HEAD"
+	}
+	var rev string
+	switch {
+	case ref == "HEAD":
+		rev = "HEAD"
+	case ref == "INDEX":
+		rev = "" // ":path" is the index
+	case ref == "BASE":
+		rev = s.diffBase
+	case validSHA(ref):
+		rev = ref
+	case strings.HasSuffix(ref, "^") && validSHA(strings.TrimSuffix(ref, "^")):
+		rev = ref
+	default:
+		fail(w, http.StatusBadRequest, "ref must be HEAD, INDEX, BASE, a commit SHA, or a SHA followed by ^")
+		return
+	}
+	if !gitAvailable(s.ix.Root()) {
+		writeJSON(w, map[string]any{
+			"path": rel, "ref": ref, "exists": false,
+			"binary": false, "tooLarge": false, "text": "", "size": 0, "eol": "\n",
+		})
+		return
+	}
+	data, size, exists, dir, err := gitBlob(s.ix.Root(), rev, rel, maxTextBytes)
+	if err != nil {
+		fail(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	if dir {
+		fail(w, http.StatusBadRequest, "is a directory")
+		return
+	}
+	t := fileText{Path: rel, Size: size, EOL: "\n"}
+	if exists && data == nil && size > maxTextBytes {
+		t.TooLarge = true
+	} else if exists {
+		t.textOf(data)
+	}
+	writeJSON(w, map[string]any{
+		"path": rel, "ref": ref, "exists": exists,
+		"binary": t.Binary, "tooLarge": t.TooLarge, "text": t.Text,
+		"size": t.Size, "eol": t.EOL,
+	})
+}
+
+// handleGitStage adds files to the index (POST {path}, {paths} or {all}).
+func (s *Server) handleGitStage(w http.ResponseWriter, r *http.Request) {
+	if !localPost(w, r) {
+		return
+	}
+	rels, ok := s.decodeGitPaths(w, r, true)
+	if !ok {
+		return
+	}
+	if err := gitStagePaths(s.ix.Root(), rels); err != nil {
+		fail(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	s.gitChanged(w)
+}
+
+// handleGitUnstage removes files from the index without touching the
+// working tree (POST {path}, {paths} or {all}).
 func (s *Server) handleGitUnstage(w http.ResponseWriter, r *http.Request) {
 	if !localPost(w, r) {
 		return
 	}
-	rel, ok := s.decodeGitPath(w, r)
+	rels, ok := s.decodeGitPaths(w, r, true)
 	if !ok {
 		return
 	}
-	if err := gitUnstage(s.ix.Root(), rel); err != nil {
+	if err := gitUnstagePaths(s.ix.Root(), rels); err != nil {
+		fail(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	s.gitChanged(w)
+}
+
+// handleGitDiscard throws away the working tree's changes to files (POST
+// {paths} or {path}): tracked files go back to their staged version,
+// untracked ones are deleted. Never the whole root at once, and never .git.
+func (s *Server) handleGitDiscard(w http.ResponseWriter, r *http.Request) {
+	if !localPost(w, r) {
+		return
+	}
+	rels, ok := s.decodeGitPaths(w, r, false)
+	if !ok {
+		return
+	}
+	root := s.ix.Root()
+	for _, rel := range rels {
+		if _, _, ok := s.editablePath(rel); !ok {
+			fail(w, http.StatusBadRequest, "bad path: "+rel)
+			return
+		}
+	}
+	removed, err := gitDiscardPaths(root, rels)
+	for _, rel := range append(rels, removed...) {
+		abs := filepath.Join(root, filepath.FromSlash(rel))
+		st, statErr := os.Stat(abs)
+		s.treeChanged(abs, rel, statErr == nil && st.IsDir())
+	}
+	// Restoring brings deleted files back and removing takes untracked ones
+	// away: either way the tree may have changed shape.
+	s.fsChanged(true)
+	if err != nil {
 		fail(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	if s.gitWatcher != nil {
-		payload := s.gitWatcher.Refresh()
-		writeJSON(w, payload)
+		writeJSON(w, struct {
+			OK bool `json:"ok"`
+			GitStatusPayload
+		}{true, s.gitWatcher.Refresh()})
 		return
 	}
 	s.ix.UpdateGitStatus()
@@ -1882,76 +2231,40 @@ func (s *Server) handleGitHunk(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true, "path": rel, "action": body.Action})
 }
 
-// handleGitCommit commits whatever is currently staged (POST {message}).
+// handleGitCommit commits whatever is currently staged (POST {message}),
+// staging everything first when nothing is. With amend it replaces the last
+// commit instead: with what is staged (and only that), keeping the old
+// message when message is empty.
 func (s *Server) handleGitCommit(w http.ResponseWriter, r *http.Request) {
 	if !localPost(w, r) {
 		return
 	}
 	var body struct {
 		Message string `json:"message"`
+		Amend   bool   `json:"amend"`
 	}
-	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil || strings.TrimSpace(body.Message) == "" {
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body); err != nil || (strings.TrimSpace(body.Message) == "" && !body.Amend) {
 		fail(w, http.StatusBadRequest, "message is required")
 		return
 	}
 	root := s.ix.Root()
-	if len(gitStagedPaths(root)) == 0 && gitHasUncommittedChanges(root) {
-		_ = gitStage(root, ".")
+	var err error
+	if body.Amend {
+		err = gitCommitAmend(root, strings.TrimSpace(body.Message))
+	} else {
+		if len(gitStagedPaths(root)) == 0 && gitHasUncommittedChanges(root) {
+			_ = gitStage(root, ".")
+		}
+		err = gitCommit(root, strings.TrimSpace(body.Message))
 	}
-	if err := gitCommit(root, strings.TrimSpace(body.Message)); err != nil {
+	if err != nil {
 		fail(w, http.StatusBadGateway, err.Error())
 		return
 	}
 	if s.gitWatcher != nil {
 		s.gitWatcher.Trigger()
 	}
-	s.tel.Track("git_commit", nil)
 	writeJSON(w, map[string]any{"ok": true})
-}
-
-// handleGitCommitMessage dispatches the selected coding harness to write a
-// commit message for the currently staged diff, honoring the
-// git.commitMessageInstruction setting. Returns an agent job the frontend
-// polls via the existing /api/agent/job, the same as an inline edit.
-func (s *Server) handleGitCommitMessage(w http.ResponseWriter, r *http.Request) {
-	if !localPost(w, r) {
-		return
-	}
-	if !s.agentOrFail(w) {
-		return
-	}
-	root := s.ix.Root()
-	files := gitStagedFiles(root)
-	if len(files) == 0 {
-		// Auto-stage all uncommitted changes if nothing is staged
-		if gitHasUncommittedChanges(root) {
-			_ = gitStage(root, ".")
-			files = gitStagedFiles(root)
-			if s.gitWatcher != nil {
-				s.gitWatcher.Trigger()
-			}
-		}
-	}
-	if len(files) == 0 {
-		fail(w, http.StatusBadRequest, "nothing staged to generate a message for")
-		return
-	}
-	stat := gitStagedStat(root)
-	diff := gitStagedDiff(root)
-	instruction := ""
-	if cfg := settings.Read(); cfg.GitCommitMessageInstruction != nil {
-		instruction = strings.TrimSpace(*cfg.GitCommitMessageInstruction)
-	}
-	job, err := s.agent.StartPrompt("commit message", commitMessagePrompt(files, stat, diff, instruction))
-	if err != nil {
-		code := http.StatusBadGateway
-		if errors.Is(err, errAgentNone) {
-			code = http.StatusBadRequest
-		}
-		fail(w, code, err.Error())
-		return
-	}
-	writeJSON(w, job)
 }
 
 // handleGitPush pushes the current branch to its remote -- or, in a PR
@@ -2048,7 +2361,7 @@ func (s *Server) handleGitPull(w http.ResponseWriter, r *http.Request) {
 	if err := gitFFOnlyPull(root, remote, remoteBranch); err != nil {
 		if errors.Is(err, errNotFastForward) {
 			// The fetch already landed, so the counts reflect the remote as
-			// it is now. The panel offers a rebase or merge from here.
+			// it is now: the panel shows how far the two have diverged.
 			st := s.gitSyncState(root)
 			st.Code = "diverged"
 			failSync(w, st, fmt.Sprintf("can't fast-forward: %s has diverged from %s", branch, st.Upstream))
@@ -2064,14 +2377,15 @@ func (s *Server) handleGitPull(w http.ResponseWriter, r *http.Request) {
 }
 
 // gitSyncState is where the current branch stands against its upstream:
-// what the git panel needs to offer (or follow up on) a rebase or merge.
+// what the git panel shows when a pull refuses to fast-forward, or when a
+// rebase or merge started elsewhere was left half-done.
 type gitSyncState struct {
 	Code       string `json:"code,omitempty"` // "diverged" or "in-progress" on a refused pull
 	Branch     string `json:"branch"`
 	Upstream   string `json:"upstream"` // e.g. "origin/main"; empty when none is configured; a PR's base branch name
 	Ahead      int    `json:"ahead"`
 	Behind     int    `json:"behind"`
-	InProgress string `json:"inProgress,omitempty"` // "rebase" or "merge" left half-done
+	InProgress string `json:"inProgress,omitempty"` // an operation left half-done (gitOpInProgress)
 	Dirty      bool   `json:"dirty"`
 
 	// PR review sessions only: the PR number, and whether the checkout was
@@ -2079,8 +2393,6 @@ type gitSyncState struct {
 	// force-push can update the PR.
 	PR        int  `json:"pr,omitempty"`
 	Rewritten bool `json:"rewritten,omitempty"`
-
-	ontoRef string // the ref px0 fetched the PR's base into; the harness rebases onto it and never fetches
 }
 
 // syncPRRefs copies the PR session's head and merge-base into the server and
@@ -2109,7 +2421,7 @@ func (s *Server) prSyncState(fetch bool) (gitSyncState, error) {
 	p := s.pr
 	root := s.ix.Root()
 	p.mu.Lock()
-	st := gitSyncState{PR: p.meta.Number, Branch: p.meta.HeadRef, Upstream: p.meta.BaseRef, ontoRef: prBaseRef(p.meta.Number)}
+	st := gitSyncState{PR: p.meta.Number, Branch: p.meta.HeadRef, Upstream: p.meta.BaseRef}
 	p.mu.Unlock()
 	st.InProgress = gitOpInProgress(root)
 	if st.InProgress != "" {
@@ -2119,7 +2431,7 @@ func (s *Server) prSyncState(fetch bool) (gitSyncState, error) {
 	if fetch && st.InProgress == "" {
 		_, err = p.FetchBase()
 	}
-	st.Ahead, st.Behind = gitAheadBehindRef(root, st.ontoRef)
+	st.Ahead, st.Behind = gitAheadBehindRef(root, prBaseRef(st.PR))
 	st.Rewritten = p.Rewritten()
 	st.Dirty = gitHasUncommittedChanges(root)
 	return st, err
@@ -2157,7 +2469,8 @@ func failSync(w http.ResponseWriter, st gitSyncState, msg string) {
 }
 
 // handleGitSyncState reports the branch's standing against its upstream,
-// read after an agent rebase/merge finishes to tell done from half-done.
+// including a rebase or merge left half-done (from a terminal), so the panel
+// can offer to abort it.
 func (s *Server) handleGitSyncState(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		fail(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -2179,69 +2492,7 @@ func (s *Server) handleGitSyncState(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, s.gitSyncState(s.ix.Root()))
 }
 
-// handleGitSyncAgent dispatches the selected harness to rebase (or merge)
-// the current branch onto its upstream after a pull refused to
-// fast-forward. Only ever on an explicit click: px0 itself still never
-// rewrites history, and the harness is told never to push. When a rebase or
-// merge is already half-done (the last attempt stopped on a conflict), the
-// harness is asked to finish that one instead of starting over.
-func (s *Server) handleGitSyncAgent(w http.ResponseWriter, r *http.Request) {
-	if !localPost(w, r) {
-		return
-	}
-	if !s.agentOrFail(w) {
-		return
-	}
-	var body struct {
-		Strategy string `json:"strategy"`
-	}
-	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<10)).Decode(&body)
-	if body.Strategy != "rebase" && body.Strategy != "merge" {
-		fail(w, http.StatusBadRequest, "strategy must be rebase or merge")
-		return
-	}
-	root := s.ix.Root()
-	var st gitSyncState
-	if s.pr != nil {
-		// In a PR review, the branch is brought up to date with the PR's
-		// base: fetched here, fresh, so the harness never fetches itself.
-		var err error
-		if st, err = s.prSyncState(true); err != nil {
-			fail(w, http.StatusBadGateway, err.Error())
-			return
-		}
-	} else {
-		st = s.gitSyncState(root)
-	}
-	if st.InProgress == "" && st.Dirty {
-		fail(w, http.StatusConflict, "commit or discard your local changes before a "+body.Strategy)
-		return
-	}
-	if st.InProgress != "" && st.InProgress != body.Strategy {
-		fail(w, http.StatusConflict, "a "+st.InProgress+" is already in progress; abort it first")
-		return
-	}
-	if st.Upstream == "" {
-		fail(w, http.StatusBadRequest, "no upstream branch configured for "+st.Branch)
-		return
-	}
-	if st.InProgress == "" && st.PR > 0 && st.Behind == 0 {
-		fail(w, http.StatusConflict, "the PR already contains everything on "+st.Upstream+"; nothing to "+body.Strategy)
-		return
-	}
-	job, err := s.agent.StartPrompt(body.Strategy+" onto "+st.Upstream, gitSyncPrompt(body.Strategy, st))
-	if err != nil {
-		code := http.StatusBadGateway
-		if errors.Is(err, errAgentNone) {
-			code = http.StatusBadRequest
-		}
-		fail(w, code, err.Error())
-		return
-	}
-	writeJSON(w, job)
-}
-
-// handleGitAbort aborts a rebase or merge left in progress.
+// handleGitAbort aborts a rebase, merge, cherry-pick or revert left in progress.
 func (s *Server) handleGitAbort(w http.ResponseWriter, r *http.Request) {
 	if !localPost(w, r) {
 		return
@@ -2256,7 +2507,8 @@ func (s *Server) handleGitAbort(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-// handleGitLog returns recent commits from HEAD (default 5).
+// handleGitLog returns recent commits from HEAD (?limit=, default 5, at
+// most 200; ?skip= pages further back).
 func (s *Server) handleGitLog(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		fail(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -2264,12 +2516,13 @@ func (s *Server) handleGitLog(w http.ResponseWriter, r *http.Request) {
 	}
 	limit := 5
 	if l := r.URL.Query().Get("limit"); l != "" {
-		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 50 {
+		if n, err := strconv.Atoi(l); err == nil && n > 0 && n <= 200 {
 			limit = n
 		}
 	}
+	skip, _ := strconv.Atoi(r.URL.Query().Get("skip"))
 	branch := gitCurrentBranch(s.ix.Root())
-	commits := gitRecentCommits(s.ix.Root(), limit)
+	commits := gitLog(s.ix.Root(), limit, max(skip, 0))
 	commitsURL := gitCommitsWebURL(s.ix.Root(), branch)
 	writeJSON(w, map[string]any{
 		"commits":    commits,
@@ -2541,13 +2794,6 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
-		if s.agent != nil {
-			currentSettings := settings.Read()
-			if currentSettings.Agent != "" && currentSettings.Agent != s.agent.Name() {
-				_ = s.agent.Select(currentSettings.Agent, s.agent.Model())
-			}
-		}
-
 		writeJSON(w, map[string]any{
 			"settings": settings.ReadMergedMap(),
 			"raw":      settings.ReadRawJSON(),
@@ -2556,13 +2802,6 @@ func (s *Server) handleSettings(w http.ResponseWriter, r *http.Request) {
 		})
 	default:
 		fail(w, 405, "method not allowed")
-	}
-}
-
-// CloseThreads stops every thread turn still running at shutdown.
-func (s *Server) CloseThreads() {
-	if s.threads != nil {
-		s.threads.Close()
 	}
 }
 

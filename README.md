@@ -6,28 +6,26 @@
 
 ---
 
-px0 is a review workbench and speed-first IDE built for AI-generated code. It turns your browser into a zero-latency console with native Git and GitHub integrations, instant search across massive codebases, in-place quick fixes, and seamless handoff to local AI coding harnesses.
+px0 is a browser-based code editor with the look and feel of VS Code, served by a single static Go binary. Run it on any machine, open it from any browser, and browse, edit and commit across every repository on that machine. It is built on Monaco, VS Code's own editor, and has no AI features of its own: pair it with whatever coding agent you run in a terminal.
 
-As AI agents author more code directly from the terminal, engineering productivity is no longer constrained by how fast you type - it is constrained by how fast you can review, navigate, and verify changes. px0 replaces heavy, multi-gigabyte editing suites with an instant, distraction-free environment built specifically for this review loop.
-
-- < 1 ms cold start
-- ~20–30 MB server daemon RAM (~100–180 MB total with browser tab, vs. VS Code's ~1,440 MB)
-- Single static Go binary with zero runtime dependencies (no Electron, no Node, no CGO)
-- ~280 languages tokenized natively via Chroma
-
-See full performance benchmarks and comparisons at [px0.ai/benchmarks](https://px0.ai/benchmarks).
+- Single static Go binary with zero runtime dependencies (no Electron, no Node at run time, no CGO); the whole frontend is embedded (~1.5 MB gzipped)
+- ~20–30 MB server RAM per workspace
+- Remote-first: `-host 0.0.0.0` and open it from anywhere on your network
 
 ## Features
 
-- Review workbench: Run `px0` with no arguments to open a unified launchpad on a single port, browse projects, and keep unsubmitted review drafts across sessions.
-- Pull request reviews & Git control: Review GitHub, GitLab, Gitea/Forgejo, and Bitbucket Cloud PRs directly (`px0 <pr-url>`), inspect scoped merge-base diffs, draft inline comments, 1-click agentic rebase for conflict resolution, squash and merge, browse commit diffs, and stage, commit, or push from the browser.
-- Multi-turn agent threads: Anchor conversations to code ranges (`Alt+T`), stream live tool execution over Server-Sent Events, queue batch inline edits across files (`Alt+E`), and dispatch to Claude Code, Cursor Agent, Antigravity, OpenCode, Codex, Aider, or Goose.
-- Unpushed commit review: Read the commits your branch is ahead of its tracking branch by, one file diff at a time, before you push them.
-- In-place quick edits: Edit and save a file in the browser (`Cmd/Ctrl+E`, `Cmd/Ctrl+S`) with unsaved-change protection when an agent prompt is overkill.
-- Fast navigation: Fuzzy file search (`Cmd/Ctrl+P`), symbol outline (`Cmd/Ctrl+Shift+O`), and workspace regex search (`Cmd/Ctrl+Shift+F`) in milliseconds.
-- Remote-first: Spin up on any remote server, VM, or container in `< 1 ms` (`-host 0.0.0.0`) with sandboxed traversal guards and origin verification—no SSH keys, tunnels, or remote daemons required.
-- Virtual rendering: Opens 400,000-line files smoothly by mounting only visible rows (~60 DOM rows); frees memory back to the OS after 15 seconds of inactivity.
-- Rich code viewer: 14 built-in themes, rendered Markdown with Mermaid diagrams, CSV/TSV table view, image inspector, and optional zero-config LSP.
+- **VS Code workbench**: activity bar, Explorer / Search / Source Control / Repositories / Pull Request views, editor tabs with preview tabs, split editors, breadcrumbs, Problems panel, status bar, menu bar, command center, Command Palette (`Ctrl/Cmd+Shift+P`) and Quick Open (`Ctrl/Cmd+P`, `@` symbols, `:` line).
+- **Monaco editor**: VS Code's editor with multi-cursor, find/replace, minimap, sticky scroll, bracket colouring, folding, and syntax highlighting for every Monaco language. Saving detects files changed on disk; files changed outside px0 reload by themselves.
+- **Source Control**: staged and unstaged changes, stage / unstage / discard per file or all, commit (and amend, commit & push, commit & sync), push, pull, sync, merge/rebase conflict state with abort, commit history with each commit's files, and quick-diff bars in the editor gutter. Changes open in Monaco's side-by-side or inline diff editor, editable on the working-tree side.
+- **Explorer**: file tree with git decorations, new file/folder, rename, delete, drag-and-drop move, Open Editors and Outline sections.
+- **Many repositories**: run `px0` with no folder to get the workbench, which lists every git repository on the machine with its branch and pending changes. Switch repository from inside any workspace with `Alt+O`, in the same tab or a new one.
+- **Compare any two files** (Select for Compare / Compare with Selected), like VS Code.
+- **Search across files** with regex, case and whole-word options, include globs, and Replace All.
+- **Language servers** (optional, zero-config): hover, go to definition, peek references, document symbols and diagnostics.
+- **Pull request review** for GitHub, GitLab, Gitea/Forgejo and Bitbucket Cloud (`px0 <pr-url>`): the PR's files as diffs against the merge base, inline draft comments from the editor, replies, Approve / Request Changes / Comment, and merging.
+- **Previews**: rendered Markdown (with Mermaid), CSV/TSV tables, images.
+- A workbench laid out like VS Code 1.142's modern UI (floating parts, connected tabs, sentence-case views, the compact application menu in the activity bar) and 18 themes, including VS Code's current defaults Dark 2026 (the default) and Light 2026 plus Dark Modern and Light Modern, that style both the workbench and the editor; settings in a VS Code-style Settings editor or as `settings.json`.
+- An integrated terminal like VS Code's: shells in the panel (xterm.js, WebGL) with splits, tabs, find and file links; bash shell integration (command decorations with exit codes, Ctrl+Up/Down between commands); flow control for heavy output; and shells, including vim or htop, that survive page reloads.
 
 ## Installation
 
@@ -75,6 +73,12 @@ px0 https://bitbucket.org/workspace/repo/pull-requests/9
 # Remote or headless server mode
 px0 -host 0.0.0.0 -port 7777 ~/workspace
 
+# Workbench limited to the repositories under one folder (separate several with ':')
+px0 -host 0.0.0.0 -roots ~/workspace
+
+# Allow the integrated terminal on a non-loopback address (anyone who can reach px0 can run commands)
+px0 -host 0.0.0.0 -terminal ~/workspace
+
 # Behind a reverse proxy under a subpath
 px0 -base-path /rev-123/ -host 0.0.0.0 -port 7777 ~/workspace
 ```
@@ -103,22 +107,71 @@ with zero remote setup overhead and workspace-confined file access
 (path traversal protection & DNS rebinding checks). Anyone who can reach the
 address can also edit files in that workspace, so expose it only over trusted networks.
 The workbench goes further: anyone who can reach it can browse and open any directory px0 can read.
+The [integrated terminal](docs/features/terminal.md) is off on non-loopback addresses unless you pass `-terminal`; `-no-terminal` turns it off everywhere.
 
 ## Development
+
+### Local Docker deployment
+
+On this machine, run `docker compose up -d --build` and open
+`http://10.20.7.180:7777` from the local network. The container runs the
+workbench: every git repository under `PX0_REPOS` (default `/mnt/nvme1/Projects`,
+mounted at the same path inside the container) is listed and can be opened,
+reviewed, staged and committed, in the same tab or a new one, and `-roots` keeps
+browsing inside that folder. Your `~/.gitconfig` is mounted read-only so commits
+carry your identity; pushing over HTTPS also needs the commented-out
+`~/.git-credentials` mount in `compose.yaml`. Settings and the workbench's list
+persist in the `px0-home` volume. The container runs as UID 1000 and restarts
+automatically unless explicitly stopped. To serve a different folder, run
+`PX0_REPOS=/path/to/repos docker compose up -d`.
+
+Use `docker compose ps` to check health, `docker compose logs -f` to view logs,
+and `docker compose down` to stop the deployment while retaining settings.
+To deploy on another machine, change the host IP in `compose.yaml` and ensure
+the workspace owner matches the container's UID.
+
+Building needs Go 1.24+ and [Bun](https://bun.sh) (it bundles Monaco from
+`node_modules`; `make web` installs the dependencies the first time):
 
 ```bash
 git clone https://github.com/px0-ai/px0.git
 cd px0
 
-# Run tests
-make test
-
-# Live frontend development (serves web/ assets directly from disk)
-go run . -dev .
-
-# Build binary
+# Bundle the frontend (web/src -> web/dist) and build the binary
 make build
+
+# Run tests (Go, plus the frontend checks in scripts/check-web.js)
+make test
+make web-check
 ```
+
+The frontend lives in `web/src` (ES modules, entry `main.js`; the workbench
+page is `web/src/workbench/main.js`) and is bundled by `scripts/build-web.js`.
+
+## Keyboard shortcuts
+
+The usual VS Code bindings, except where the browser keeps a key for itself
+(Ctrl/Cmd+W, +T, +N, +Tab):
+
+| Keys | Action |
+| :--- | :--- |
+| `Ctrl/Cmd+P` | Go to File (type `@` for symbols, `:` for a line, `>` for commands) |
+| `Ctrl/Cmd+Shift+P`, `F1` | Command Palette |
+| `Ctrl/Cmd+S`, `Ctrl/Cmd+Alt+S` | Save, Save All |
+| `Alt+W` | Close Editor (`Alt+Shift+T` reopens it) |
+| `Alt+1`…`Alt+9`, `Ctrl/Cmd+Alt+←/→` | Switch editor tabs |
+| `Ctrl/Cmd+\` | Split Editor |
+| `Ctrl/Cmd+B`, `Ctrl/Cmd+J` | Toggle Side Bar, Toggle Panel |
+| `` Ctrl+` ``, `` Ctrl+Shift+` ``, `Ctrl+Shift+5` | Toggle Terminal, New Terminal, Split Terminal |
+| `Ctrl/Cmd+Shift+E` / `F` / `G` | Explorer / Search / Source Control |
+| `Ctrl/Cmd+Shift+M` | Problems |
+| `Ctrl/Cmd+Shift+V`, `Ctrl/Cmd+K V` | Markdown preview, to the side |
+| `F12`, `Alt+F12`, `Shift+F12` | Go to / Peek Definition, References |
+| `Alt+←`, `Alt+→` | Go Back / Forward |
+| `Alt+F5`, `Shift+Alt+F5` | Next / previous change in a diff |
+| `Ctrl/Cmd+Enter` | Commit (in the Source Control message box) |
+| `Alt+O` | Switch Repository (workbench) |
+| `Ctrl/Cmd+,`, `Ctrl/Cmd+K Ctrl/Cmd+S`, `Ctrl/Cmd+K Ctrl/Cmd+T` | Settings, Keyboard Shortcuts, Color Theme |
 
 ## Benchmarks
 

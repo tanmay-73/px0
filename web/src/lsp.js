@@ -1,144 +1,199 @@
 // web/src/lsp.js
-import { $, S, doc_, api } from './state.js';
-import { paint } from './renderer.js';
-import { updateStatus, setStatusNote, setLspState } from './status.js';
-import { openFile } from './tabs.js';
-import { renderResults, runSearch } from './search.js';
-import { inspectReferences, showRightInspector } from './inspector.js';
-import { centerEditLine, editTextarea } from './editview.js';
+// Language intelligence for Monaco, from px0's language-server endpoints
+// (lsp.go): hover, go to definition, find references, document symbols
+// (outline, breadcrumbs, Ctrl+Shift+O) and diagnostics as editor markers.
+// When no language server is ready, definitions fall back to px0's own index
+// (/api/def) and symbols to its regex outline (/api/outline), so navigation
+// still works in any language.
+//
+// Positions: Monaco counts lines and columns from 1 in UTF-16 units; the API
+// takes 1-based lines and 0-based UTF-16 columns.
+import { monaco } from './monaco.js';
+import { api } from './api.js';
+import { emit, on } from './util.js';
+import { pathOfUri, fileUri, openDoc, allDocs } from './models.js';
 
-/* Language servers answer precisely but can take a long time to wake up, while
-   the regex index answers in milliseconds and is always there. So: use the
-   server when it is actually ready, fall back to text matching when it is not,
-   and never let a slow server block the jump. */
+const state = new Map(); // path -> { state, server, missing }
 
-/* A language server answers about a position, not a name. Only a position we
-   actually measured in the current file may be sent to it; a bare word (from
-   the palette, say) has no column and would make the server confidently answer
-   about whatever happens to sit at column 0. Those go to the text index. */
-export function positionNow(word) {
-  const d = doc_();
-  if (!d) return null;
-  if (S.at && S.at.word && S.at.path === d.path) return S.at;
-  if (word) return { word, line: d.cur, col: 0, imprecise: true };
-  return null;
+export const lspState = path => state.get(path) || { state: 'off', server: '' };
+
+function setState(path, j) {
+  if (!j || j.state === undefined) return;
+  const prev = state.get(path);
+  const next = { state: j.state, server: j.server || '', missing: j.missing || '' };
+  state.set(path, next);
+  if (!prev || prev.state !== next.state || prev.server !== next.server) emit('lsp:state', { path, ...next });
 }
 
-export function canAskServer(at) {
-  return !at.imprecise && (S.lsp.state === 'ready' || S.lsp.state === 'indexing');
-}
-
-/* Opening a file starts its language server, if there is one, and follows it
-   until it is up. Without this the first hover would find the server still
-   "starting" and quietly do nothing, with no way for the state to advance. */
-export async function warmLSP(d, tries = 0) {
-  if (!d.lsp || d.lsp.state === 'off' || d.lsp.state === 'ready' || d.lsp.state === 'failed') return;
-  if (tries > 20) return;
+export async function warm(path, tries = 0) {
+  if (!path || path.startsWith('/') || tries > 25) return;
   let j;
-  try { j = await api('/api/lsp/warm', { path: d.path, wait: tries === 0 ? 1 : 1200 }); }
-  catch { return; }
-  if (!S.tabs.includes(d)) return;
-  d.lsp = { state: j.state, server: j.server, missing: j.missing || '' };
-  if (doc_() === d) setLspState(j);
-  if (j.state === 'starting' || j.state === 'indexing') {
-    setTimeout(() => warmLSP(d, tries + 1), 900);
+  try { j = await api('api/lsp/warm', { path, wait: tries ? 1200 : 1 }); } catch { return; }
+  setState(path, j);
+  if (j.state === 'starting' || j.state === 'indexing') setTimeout(() => warm(path, tries + 1), 900);
+  else if (j.state === 'ready') refreshDiagnostics(path);
+}
+
+const ready = path => ['ready', 'indexing'].includes(lspState(path).state);
+
+const pos = (model, p) => ({ path: pathOfUri(model.uri), line: p.lineNumber, col: p.column - 1 });
+
+// A location for a hit { path, line, pre, mid }: the hit's word if the line can be read.
+function location(hit) {
+  const line = hit.line || 1;
+  const col = (hit.pre || '').length + 1;
+  const len = (hit.mid || '').length;
+  const uri = hit.path.startsWith('/') ? fileUri(hit.path) : fileUri(hit.path);
+  return { uri, range: new monaco.Range(line, len ? col : 1, line, len ? col + len : 1) };
+}
+
+// Peek widgets need the target files as models.
+async function ensureModels(hits) {
+  const paths = [...new Set(hits.map(h => h.path))].slice(0, 40);
+  await Promise.allSettled(paths.map(p => (monaco.editor.getModel(fileUri(p)) ? null : openDoc(p))));
+}
+
+const KIND = {
+  func: 'Function', function: 'Function', method: 'Method', class: 'Class', struct: 'Struct', interface: 'Interface',
+  type: 'Class', enum: 'Enum', const: 'Constant', constant: 'Constant', var: 'Variable', variable: 'Variable',
+  field: 'Field', property: 'Property', module: 'Module', namespace: 'Namespace', package: 'Package', heading: 'String',
+  section: 'String', key: 'Key', constructor: 'Constructor', event: 'Event', operator: 'Operator', typeparam: 'TypeParameter',
+};
+
+export async function documentSymbols(path) {
+  let syms = [];
+  if (ready(path)) {
+    try {
+      const j = await api('api/lsp/symbols', { path });
+      setState(path, j);
+      syms = j.symbols || [];
+    } catch {}
   }
-}
-
-export async function lspCall(kind, at, waitMs) {
-  const d = doc_();
-  if (!d) return null;
-  try {
-    const j = await api('/api/lsp/' + kind, { path: d.path, line: at.line, col: at.col, wait: waitMs });
-    setLspState(j);
-    return j;
-  } catch { return null; }
-}
-
-export async function gotoDefinition(arg, opts = {}) {
-  const d = doc_();
-  const at = (arg && arg.word) ? arg : positionNow(typeof arg === 'string' ? arg : S.lastWord);
-  if (!d || !at) return;
-  // No explicit view: follow the mode we are navigating from (diff stays diff,
-  // source stays source). A diff request on a file without a diff falls back quietly.
-  const explicit = opts.view || (arg && arg.view);
-  const view = explicit || (d.diffMode ? 'diff' : 'source');
-  const soft = !explicit;
-
-  if (canAskServer(at)) {
-    setStatusNote('definition of ' + at.word + '…', 8000);
-    const j = await lspCall('def', at, S.lsp.state === 'ready' ? 5000 : 20000);
-    updateStatus();
-    if (j && j.hits && j.hits.length) { acceptHits(at.word, j.hits, j.server, 'definition', undefined, { view, soft }); return; }
-  } else if (!at.imprecise && S.lsp.state === 'starting') {
-    // Kick the server awake for next time, but do not wait on it.
-    lspCall('def', at, 60000).then(j => {
-      if (j && j.hits && j.hits.length) showHits(at.word, j.hits, j.server, 'definition');
-    });
+  if (!syms.length) {
+    try { syms = (await api('api/outline', { path })).symbols || []; } catch {}
   }
+  return syms;
+}
 
-  setStatusNote('searching for ' + at.word + '…', 8000);
-  let rx;
-  try { rx = await api('/api/def', { sym: at.word, path: d.path }); }
-  catch (e) { setStatusNote(e.message, 4000); return; }
-  updateStatus();
-  if (rx.lsp) setLspState(rx.lsp);
-
-  if (!rx.defs || !rx.defs.length) {
-    setStatusNote('');
-    showRightInspector('search');
-    const q = $('#q');
-    if (q) { q.value = at.word; $('#o-word')?.classList.add('on'); runSearch(); }
-    return;
+// Flat symbols with indent levels -> Monaco's nested DocumentSymbols.
+function toTree(syms, model) {
+  const out = [];
+  const stack = [];
+  const lines = model.getLineCount();
+  for (const s of syms) {
+    const line = Math.min(Math.max(1, s.line), lines);
+    const end = Math.min(Math.max(line, s.end || line), lines);
+    const text = model.getLineContent(line);
+    const at = Math.max(0, text.indexOf(s.name));
+    const kindName = KIND[(s.kind || '').toLowerCase()] || 'Variable';
+    const sym = {
+      name: s.name, detail: s.detail || '', kind: monaco.languages.SymbolKind[kindName], tags: [],
+      range: new monaco.Range(line, 1, end, model.getLineMaxColumn(end)),
+      selectionRange: new monaco.Range(line, at + 1, line, at + 1 + s.name.length),
+      children: [], _indent: s.indent || 0,
+    };
+    while (stack.length && stack[stack.length - 1]._indent >= sym._indent) stack.pop();
+    (stack.length ? stack[stack.length - 1].children : out).push(sym);
+    stack.push(sym);
   }
-  acceptHits(at.word, rx.defs, null, 'definition', rx.refCount, { view, soft });
+  return out;
 }
 
-export async function findReferences(arg) {
-  const d = doc_();
-  const at = (arg && arg.word) ? arg : positionNow(typeof arg === 'string' ? arg : S.lastWord);
-  if (!d || !at) return;
-  inspectReferences(at);
+export function initLsp() {
+  const ids = monaco.languages.getLanguages().map(l => l.id);
+  const sel = ids.map(language => ({ language, scheme: 'file' }));
+
+  monaco.languages.registerHoverProvider(sel, {
+    async provideHover(model, p) {
+      const at = pos(model, p);
+      if (!at.path || !ready(at.path)) return null;
+      try {
+        const j = await api('api/lsp/hover', { ...at, wait: 2000 });
+        setState(at.path, j);
+        if (j.empty || (!j.signature && !j.doc)) return null;
+        const word = model.getWordAtPosition(p);
+        const contents = [];
+        if (j.signature) contents.push({ value: '```' + model.getLanguageId() + '\n' + j.signature + '\n```' });
+        if (j.doc) contents.push({ value: j.doc });
+        return { contents, range: word ? new monaco.Range(p.lineNumber, word.startColumn, p.lineNumber, word.endColumn) : undefined };
+      } catch { return null; }
+    },
+  });
+
+  monaco.languages.registerDefinitionProvider(sel, {
+    async provideDefinition(model, p) {
+      const at = pos(model, p);
+      if (!at.path) return null;
+      let hits = [];
+      if (ready(at.path) || lspState(at.path).state === 'starting') {
+        try {
+          const j = await api('api/lsp/def', { ...at, wait: ready(at.path) ? 5000 : 15000 });
+          setState(at.path, j);
+          hits = j.hits || [];
+        } catch {}
+      }
+      if (!hits.length) {
+        const word = model.getWordAtPosition(p)?.word;
+        if (!word) return null;
+        try { hits = (await api('api/def', { sym: word, path: at.path })).defs || []; } catch {}
+      }
+      if (!hits.length) return null;
+      await ensureModels(hits);
+      return hits.map(location);
+    },
+  });
+
+  monaco.languages.registerReferenceProvider(sel, {
+    async provideReferences(model, p) {
+      const at = pos(model, p);
+      if (!at.path || !ready(at.path)) return null;
+      try {
+        const j = await api('api/lsp/refs', { ...at, wait: 8000 });
+        setState(at.path, j);
+        const hits = j.hits || [];
+        await ensureModels(hits);
+        return hits.map(location);
+      } catch { return null; }
+    },
+  });
+
+  monaco.languages.registerDocumentSymbolProvider(sel, {
+    displayName: 'px0',
+    async provideDocumentSymbols(model) {
+      const path = pathOfUri(model.uri);
+      if (!path) return [];
+      return toTree(await documentSymbols(path), model);
+    },
+  });
+
+  on('doc:saved', d => setTimeout(() => refreshDiagnostics(d.path), 600));
+  setInterval(() => {
+    if (document.hidden) return;
+    for (const d of allDocs()) if (d.model && ready(d.path)) refreshDiagnostics(d.path);
+  }, 4000);
 }
 
-export function acceptHits(word, hits, server, noun, refCount, opts = {}) {
-  if (hits.length === 1) {
-    const h = hits[0];
-    openFile(h.path, { line: h.line, view: opts.view, soft: opts.soft });
-    flashFind(h.mid || word);
-    setStatusNote(server ? server + ' · ' + h.path + ':' + h.line : h.path + ':' + h.line, 4000);
-    return;
-  }
-  setStatusNote('');
-  showHits(word, hits, server, noun, refCount);
-}
+/* ---------- diagnostics ---------- */
 
-export function showHits(word, hits, server, noun, refCount) {
-  setStatusNote('');
-  const n = hits.length;
-  let head = n + ' ' + noun + (n === 1 ? '' : 's') + ' of "' + word + '"';
-  head += server ? '  ·  ' + server : '  ·  text match, no language server';
-  if (refCount) head += '  ·  ' + refCount + ' other references';
-  renderResults({ results: groupHits(hits), files: 0, total: n, header: head, exact: !!server });
-  showRightInspector('search');
-}
+const SEV = () => ({ 1: monaco.MarkerSeverity.Error, 2: monaco.MarkerSeverity.Warning, 3: monaco.MarkerSeverity.Info, 4: monaco.MarkerSeverity.Hint });
 
-export function groupHits(hits) {
-  const byPath = new Map();
-  for (const h of hits) {
-    if (!byPath.has(h.path)) byPath.set(h.path, { path: h.path, ext: h.ext, matches: [] });
-    byPath.get(h.path).matches.push(h);
-  }
-  return [...byPath.values()];
-}
-
-export function flashFind(q) {
-  const d = doc_();
-  if (!d || !q) return;
-  if (d.isEditing && editTextarea) {
-    centerEditLine(d.cur, q);
-    return;
-  }
-  S.find = { q, cs: false, hits: [{ line: d.cur, n: 0 }], byLine: new Set([d.cur]), active: 0 };
-  setTimeout(paint, 0);
+export async function refreshDiagnostics(path) {
+  const model = monaco.editor.getModel(fileUri(path));
+  if (!model) return;
+  let j;
+  try { j = await api('api/lsp/diagnostics', { path }); } catch { return; }
+  setState(path, j);
+  const sev = SEV();
+  const markers = (j.diagnostics || []).map(d => ({
+    severity: sev[d.severity] || monaco.MarkerSeverity.Info,
+    message: d.message,
+    source: d.source || j.server || '',
+    code: d.code || undefined,
+    startLineNumber: d.line,
+    startColumn: (d.col || 0) + 1,
+    endLineNumber: d.endLine || d.line,
+    endColumn: (d.endCol ?? d.col ?? 0) + 1 + (d.endCol === undefined && !d.endLine ? 1 : 0),
+  }));
+  if (model.isDisposed()) return;
+  monaco.editor.setModelMarkers(model, 'lsp', markers);
 }

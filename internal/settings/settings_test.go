@@ -18,11 +18,14 @@ func isolateSettings(t *testing.T) string {
 func TestSettingsDefaults(t *testing.T) {
 	isolateSettings(t)
 	m := ReadMergedMap()
-	if m["editor.fontSize"] != 13.5 {
-		t.Errorf("expected editor.fontSize 13.5, got %v", m["editor.fontSize"])
+	if m["files.autoSave"] != "off" || m["files.autoSaveDelay"] != 1000 {
+		t.Errorf("expected Auto Save off with a 1000ms delay, got %v / %v", m["files.autoSave"], m["files.autoSaveDelay"])
 	}
-	if m["workbench.colorTheme"] != "catppuccin-mocha" {
-		t.Errorf("expected workbench.colorTheme catppuccin-mocha, got %v", m["workbench.colorTheme"])
+	if m["editor.fontSize"] != 14.0 {
+		t.Errorf("expected editor.fontSize 14, got %v", m["editor.fontSize"])
+	}
+	if m["workbench.colorTheme"] != "vscode-dark-2026" {
+		t.Errorf("expected workbench.colorTheme vscode-dark-2026, got %v", m["workbench.colorTheme"])
 	}
 	if m["editor.wordWrap"] != "on" {
 		t.Errorf("expected editor.wordWrap on, got %v", m["editor.wordWrap"])
@@ -45,8 +48,9 @@ func TestSettingsDefaults(t *testing.T) {
 	if m["lsp.enabled"] != true {
 		t.Errorf("expected lsp.enabled true, got %v", m["lsp.enabled"])
 	}
-	if m["agent.timeoutSeconds"] != 120.0 && m["agent.timeoutSeconds"] != 120 {
-		t.Errorf("expected agent.timeoutSeconds 120, got %v", m["agent.timeoutSeconds"])
+	// Defaults are the schema plus the misspelled autoReveal alias, nothing else.
+	if d := DefaultMap(); len(d) != len(Schema)+1 {
+		t.Errorf("DefaultMap has %d keys, want %d (schema + alias)", len(d), len(Schema)+1)
 	}
 	if m["server.basePath"] != "/" {
 		t.Errorf("expected server.basePath /, got %v", m["server.basePath"])
@@ -108,31 +112,21 @@ func TestSettingsAutoReveal(t *testing.T) {
 	}
 }
 
-func TestSettingsPreserveNonAgentValues(t *testing.T) {
+func TestSettingsPreserveUnrelatedValues(t *testing.T) {
 	cfg := isolateSettings(t)
 
-	// Step 1: Update editor settings
-	err := UpdateMap(map[string]any{
+	if err := UpdateMap(map[string]any{
 		"editor.fontSize":      16.0,
 		"workbench.colorTheme": "gruvbox-dark",
 		"custom.property":      "hello",
-	})
-	if err != nil {
+	}); err != nil {
+		t.Fatalf("UpdateMap failed: %v", err)
+	}
+	// A second, unrelated update must not wipe the first.
+	if err := UpdateMap(map[string]any{"editor.tabSize": 2.0}); err != nil {
 		t.Fatalf("UpdateMap failed: %v", err)
 	}
 
-	// Step 2: Agent selects a harness (which calls Write)
-	err = Write(Settings{
-		Agent: "claude",
-		Models: map[string]string{
-			"claude": "sonnet",
-		},
-	})
-	if err != nil {
-		t.Fatalf("Write failed: %v", err)
-	}
-
-	// Step 3: Verify editor settings were NOT wiped
 	m := ReadMergedMap()
 	if m["editor.fontSize"] != 16.0 {
 		t.Errorf("editor.fontSize was overwritten: got %v, want 16", m["editor.fontSize"])
@@ -143,11 +137,7 @@ func TestSettingsPreserveNonAgentValues(t *testing.T) {
 	if m["custom.property"] != "hello" {
 		t.Errorf("custom.property was lost: got %v, want hello", m["custom.property"])
 	}
-	if m["agent"] != "claude" || m["agent.harness"] != "claude" {
-		t.Errorf("agent not set properly: %v", m["agent"])
-	}
 
-	// Step 4: Verify file on disk
 	data, err := os.ReadFile(filepath.Join(cfg, "px0", "settings.json"))
 	if err != nil {
 		t.Fatalf("failed to read settings file: %v", err)
@@ -156,8 +146,8 @@ func TestSettingsPreserveNonAgentValues(t *testing.T) {
 	if err := json.Unmarshal(data, &diskMap); err != nil {
 		t.Fatalf("corrupt settings JSON: %v", err)
 	}
-	if diskMap["editor.fontSize"] != 16.0 {
-		t.Errorf("diskMap missing editor.fontSize: %v", diskMap)
+	if diskMap["editor.fontSize"] != 16.0 || diskMap["editor.tabSize"] != 2.0 {
+		t.Errorf("diskMap missing updates: %v", diskMap)
 	}
 }
 
@@ -212,7 +202,7 @@ func TestSettingsRawJSON(t *testing.T) {
 	}
 
 	// Save valid JSON
-	raw := []byte(`{"editor.fontSize": 15.0, "agent": "claude-code"}`)
+	raw := []byte(`{"editor.fontSize": 15.0, "custom.key": "kept"}`)
 	if err := SaveRawJSON(raw); err != nil {
 		t.Fatalf("SaveRawJSON failed: %v", err)
 	}
@@ -250,4 +240,3 @@ func isolateSettingsBenchmark(b *testing.B) {
 	dir := b.TempDir()
 	b.Setenv("XDG_CONFIG_HOME", dir)
 }
-

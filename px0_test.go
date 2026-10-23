@@ -47,6 +47,15 @@ func newTestServer(t *testing.T) (*Server, string) {
 	return NewServer(ix, nil), root
 }
 
+// isolateSettings points the settings file at a temp dir, so a test never reads
+// or overwrites the developer's own settings.
+func isolateSettings(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	t.Setenv("XDG_CONFIG_HOME", dir)
+	return dir
+}
+
 func get(t *testing.T, s *Server, url string) (int, map[string]any) {
 	t.Helper()
 	rec := httptest.NewRecorder()
@@ -70,7 +79,7 @@ func TestThemesStylesheetJoinsEveryThemeFile(t *testing.T) {
 	if len(files) == 0 {
 		t.Fatal("no themes in web/themes")
 	}
-	// Tokens with no fallback in style.css. Keep in sync with docs/internals/styling-and-themes.md.
+	// Tokens with no fallback in web/src/css/app.css. Keep in sync with docs/internals/styling-and-themes.md.
 	required := []string{
 		"--bg", "--bg2", "--bg3", "--bg4", "--fg", "--dim", "--faint", "--line",
 		"--accent", "--accent-fg", "--sel", "--mark", "--mark-active", "--cur", "--shadow",
@@ -98,14 +107,23 @@ func TestThemesStylesheetJoinsEveryThemeFile(t *testing.T) {
 func TestStaticAssetServing(t *testing.T) {
 	s, _ := newTestServer(t)
 
-	// 1. Serving uncompressed assets (e.g. style.css)
+	// 1. Serving uncompressed assets (a theme)
 	rec := httptest.NewRecorder()
-	s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/static/style.css", nil))
+	s.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/static/themes/dark.css", nil))
 	if rec.Code != http.StatusOK {
-		t.Fatalf("style.css status %d", rec.Code)
+		t.Fatalf("theme status %d", rec.Code)
 	}
 	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/css") {
-		t.Errorf("style.css content-type: %s", ct)
+		t.Errorf("theme content-type: %s", ct)
+	}
+
+	// The bundled editor is stored gzipped and sent as is.
+	rec = httptest.NewRecorder()
+	req0 := httptest.NewRequest(http.MethodGet, "/static/dist/app.js", nil)
+	req0.Header.Set("Accept-Encoding", "gzip")
+	s.ServeHTTP(rec, req0)
+	if rec.Code != http.StatusOK || rec.Header().Get("Content-Encoding") != "gzip" {
+		t.Fatalf("app.js: status %d, encoding %q", rec.Code, rec.Header().Get("Content-Encoding"))
 	}
 
 	// 2. Serving compressed vendor assets with Accept-Encoding: gzip
@@ -1138,11 +1156,7 @@ func TestFileSave(t *testing.T) {
 		"path":    "main.go",
 		"content": newContent,
 	})
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/file/save", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	s.ServeHTTP(rec, req)
-
+	rec := postJSON(t, s, "/api/file/save", string(body))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1153,16 +1167,21 @@ func TestFileSave(t *testing.T) {
 	if string(diskBytes) != newContent {
 		t.Fatalf("file content mismatch: got %q, want %q", string(diskBytes), newContent)
 	}
+	var saved struct {
+		Mtime int64 `json:"mtime"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &saved)
+	st, _ := os.Stat(filepath.Join(root, "main.go"))
+	if saved.Mtime != st.ModTime().UnixMilli() {
+		t.Fatalf("save reported mtime %d, file has %d", saved.Mtime, st.ModTime().UnixMilli())
+	}
 
 	// 2. Reject path traversal
 	body, _ = json.Marshal(map[string]string{
 		"path":    "../../escape.txt",
 		"content": "bad",
 	})
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/api/file/save", bytes.NewReader(body))
-	s.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
+	if rec = postJSON(t, s, "/api/file/save", string(body)); rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for path traversal, got %d", rec.Code)
 	}
 
@@ -1171,11 +1190,148 @@ func TestFileSave(t *testing.T) {
 		"path":    "sub",
 		"content": "bad",
 	})
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/api/file/save", bytes.NewReader(body))
-	s.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
+	if rec = postJSON(t, s, "/api/file/save", string(body)); rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for directory target, got %d", rec.Code)
+	}
+
+	// 4. A page from another site cannot write files.
+	req := httptest.NewRequest(http.MethodPost, "/api/file/save", strings.NewReader(`{"path":"x.txt","content":"x"}`))
+	req.Host = "127.0.0.1:7777"
+	req.Header.Set("Origin", "http://evil.example")
+	rec = httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin save: got %d, want 403", rec.Code)
+	}
+}
+
+// TestFileSaveConflict covers the editor's guard against overwriting a file
+// that changed on disk since it was loaded: the mtime it loaded travels back
+// with the save.
+func TestFileSaveConflict(t *testing.T) {
+	s, root := newTestServer(t)
+	abs := filepath.Join(root, "main.go")
+	code, m := get(t, s, "/api/file/text?path=main.go")
+	if code != 200 {
+		t.Fatalf("file/text: %d %v", code, m)
+	}
+	loaded := int64(m["mtime"].(float64))
+
+	// Saving with the mtime it was loaded at succeeds and reports the new one.
+	rec := postJSON(t, s, "/api/file/save", fmt.Sprintf(`{"path":"main.go","content":"one\n","mtime":%d}`, loaded))
+	if rec.Code != 200 {
+		t.Fatalf("save with current mtime: %d %s", rec.Code, rec.Body.String())
+	}
+	var ok struct {
+		Mtime int64 `json:"mtime"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &ok)
+
+	// Something else writes the file; a save with the stale mtime is refused.
+	later := time.Now().Add(time.Hour)
+	os.WriteFile(abs, []byte("theirs\n"), 0o644)
+	os.Chtimes(abs, later, later)
+	rec = postJSON(t, s, "/api/file/save", fmt.Sprintf(`{"path":"main.go","content":"mine\n","mtime":%d}`, ok.Mtime))
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("stale save: got %d, want 409: %s", rec.Code, rec.Body.String())
+	}
+	var c map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &c)
+	if c["conflict"] != true || int64(c["mtime"].(float64)) != later.UnixMilli() || c["error"] == "" {
+		t.Fatalf("conflict body = %v", c)
+	}
+	if b, _ := os.ReadFile(abs); string(b) != "theirs\n" {
+		t.Fatalf("a refused save wrote the file: %q", b)
+	}
+
+	// A file deleted on disk is simply recreated, mtime or not.
+	os.Remove(abs)
+	if rec = postJSON(t, s, "/api/file/save", `{"path":"main.go","content":"back\n","mtime":1}`); rec.Code != 200 {
+		t.Fatalf("save over a deleted file: %d %s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestFileText(t *testing.T) {
+	s, root := newTestServer(t)
+	write := func(rel string, b []byte) {
+		if err := os.WriteFile(filepath.Join(root, rel), b, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("crlf.txt", []byte("one\r\ntwo\nthree"))
+	write("bin.dat", []byte("ab\x00cd"))
+	write("latin1.txt", []byte("caf\xe9\n"))
+
+	code, m := get(t, s, "/api/file/text?path=crlf.txt")
+	if code != 200 || m["text"] != "one\r\ntwo\nthree" || m["eol"] != "\r\n" || m["binary"] != false || m["tooLarge"] != false || m["size"] != 14.0 || m["path"] != "crlf.txt" {
+		t.Fatalf("crlf.txt: %d %v", code, m)
+	}
+	st, _ := os.Stat(filepath.Join(root, "crlf.txt"))
+	if int64(m["mtime"].(float64)) != st.ModTime().UnixMilli() {
+		t.Fatalf("mtime %v, want %d", m["mtime"], st.ModTime().UnixMilli())
+	}
+	if _, m = get(t, s, "/api/file/text?path=main.go"); m["eol"] != "\n" || !strings.HasPrefix(m["text"].(string), "package main\n") {
+		t.Fatalf("main.go: %v", m)
+	}
+	for _, p := range []string{"bin.dat", "latin1.txt"} {
+		if code, m = get(t, s, "/api/file/text?path="+p); code != 200 || m["binary"] != true || m["text"] != "" {
+			t.Fatalf("%s should be binary: %d %v", p, code, m)
+		}
+	}
+	if code, _ = get(t, s, "/api/file/text?path=missing.go"); code != 404 {
+		t.Fatalf("missing file: %d, want 404", code)
+	}
+	if code, _ = get(t, s, "/api/file/text?path=sub"); code != 400 {
+		t.Fatalf("directory: %d, want 400", code)
+	}
+	if code, _ = get(t, s, "/api/file/text?path=../x"); code != 400 {
+		t.Fatalf("outside the root: %d, want 400", code)
+	}
+
+	// Past the cap only the size goes back.
+	f, _ := os.Create(filepath.Join(root, "huge.log"))
+	f.Truncate(maxTextBytes + 1)
+	f.Close()
+	if code, m = get(t, s, "/api/file/text?path=huge.log"); code != 200 || m["tooLarge"] != true || m["text"] != "" || m["size"] != float64(maxTextBytes+1) {
+		t.Fatalf("huge.log: %d %v", code, m)
+	}
+}
+
+func TestFileStat(t *testing.T) {
+	s, root := newTestServer(t)
+	rec := postJSON(t, s, "/api/file/stat", `{"paths":["main.go","gone.go","sub","../etc/passwd"]}`)
+	if rec.Code != 200 {
+		t.Fatalf("stat: %d %s", rec.Code, rec.Body.String())
+	}
+	var resp struct {
+		Files     map[string]fileStat `json:"files"`
+		Truncated bool                `json:"truncated"`
+	}
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	st, _ := os.Stat(filepath.Join(root, "main.go"))
+	if got := resp.Files["main.go"]; !got.Exists || got.Mtime != st.ModTime().UnixMilli() || got.Size != st.Size() || got.Dir {
+		t.Fatalf("main.go = %+v", got)
+	}
+	if got, ok := resp.Files["gone.go"]; !ok || got.Exists {
+		t.Fatalf("gone.go = %+v (listed %v)", got, ok)
+	}
+	if got := resp.Files["sub"]; !got.Exists || !got.Dir {
+		t.Fatalf("sub = %+v", got)
+	}
+	if _, ok := resp.Files["../etc/passwd"]; ok || resp.Truncated {
+		t.Fatalf("a path outside the root was answered: %+v", resp)
+	}
+
+	many := make([]string, maxStatPaths+10)
+	for i := range many {
+		many[i] = fmt.Sprintf("f%d.go", i)
+	}
+	b, _ := json.Marshal(map[string]any{"paths": many})
+	rec = postJSON(t, s, "/api/file/stat", string(b))
+	resp.Files, resp.Truncated = nil, false
+	json.Unmarshal(rec.Body.Bytes(), &resp)
+	if !resp.Truncated || len(resp.Files) != maxStatPaths {
+		t.Fatalf("over the cap: truncated=%v, %d files", resp.Truncated, len(resp.Files))
 	}
 }
 
@@ -1183,15 +1339,8 @@ func TestFSNew(t *testing.T) {
 	s, root := newTestServer(t)
 
 	// 1. Create new file with nested directory
-	body, _ := json.Marshal(map[string]string{
-		"path": "pkg/nested/new_file.go",
-		"type": "file",
-	})
-	rec := httptest.NewRecorder()
-	req := httptest.NewRequest(http.MethodPost, "/api/fs/new", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	s.ServeHTTP(rec, req)
-
+	body := `{"path":"pkg/nested/new_file.go","type":"file"}`
+	rec := postJSON(t, s, "/api/fs/new", body)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
@@ -1205,22 +1354,12 @@ func TestFSNew(t *testing.T) {
 	}
 
 	// 2. Creating already existing file should fail with 409 Conflict
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/api/fs/new", bytes.NewReader(body))
-	s.ServeHTTP(rec, req)
-	if rec.Code != http.StatusConflict {
+	if rec = postJSON(t, s, "/api/fs/new", body); rec.Code != http.StatusConflict {
 		t.Fatalf("expected 409 conflict, got %d", rec.Code)
 	}
 
 	// 3. Create new directory
-	body, _ = json.Marshal(map[string]string{
-		"path": "src/components",
-		"type": "dir",
-	})
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/api/fs/new", bytes.NewReader(body))
-	s.ServeHTTP(rec, req)
-	if rec.Code != http.StatusOK {
+	if rec = postJSON(t, s, "/api/fs/new", `{"path":"src/components","type":"dir"}`); rec.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
 	}
 	dirPath := filepath.Join(root, "src", "components")
@@ -1230,16 +1369,140 @@ func TestFSNew(t *testing.T) {
 	}
 
 	// 4. Reject traversal
-	body, _ = json.Marshal(map[string]string{
-		"path": "../evil",
-		"type": "file",
-	})
-	rec = httptest.NewRecorder()
-	req = httptest.NewRequest(http.MethodPost, "/api/fs/new", bytes.NewReader(body))
-	s.ServeHTTP(rec, req)
-	if rec.Code != http.StatusBadRequest {
+	if rec = postJSON(t, s, "/api/fs/new", `{"path":"../evil","type":"file"}`); rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 for path traversal, got %d", rec.Code)
 	}
+}
+
+// indexed reports whether quick open knows rel.
+func indexed(s *Server, rel string) bool {
+	for _, f := range s.ix.Files() {
+		if f.Path == rel {
+			return true
+		}
+	}
+	return false
+}
+
+func TestFSRename(t *testing.T) {
+	s, root := newTestServer(t)
+
+	// A file, into a folder that doesn't exist yet.
+	rec := postJSON(t, s, "/api/fs/rename", `{"from":"greet.go","to":"pkg/hello/greet.go"}`)
+	if rec.Code != 200 {
+		t.Fatalf("rename file: %d %s", rec.Code, rec.Body.String())
+	}
+	var m map[string]any
+	json.Unmarshal(rec.Body.Bytes(), &m)
+	if m["ok"] != true || m["path"] != "pkg/hello/greet.go" {
+		t.Fatalf("rename response = %v", m)
+	}
+	if _, err := os.Stat(filepath.Join(root, "pkg", "hello", "greet.go")); err != nil {
+		t.Fatal(err)
+	}
+	if indexed(s, "greet.go") || !indexed(s, "pkg/hello/greet.go") {
+		t.Fatal("the index did not follow the rename")
+	}
+
+	// A folder: everything under it moves in the index too.
+	if rec = postJSON(t, s, "/api/fs/rename", `{"from":"pkg","to":"lib/pkg"}`); rec.Code != 200 {
+		t.Fatalf("rename folder: %d %s", rec.Code, rec.Body.String())
+	}
+	if indexed(s, "pkg/hello/greet.go") || !indexed(s, "lib/pkg/hello/greet.go") {
+		t.Fatal("the index did not follow the folder rename")
+	}
+	if kids, ok := s.ix.Children("lib/pkg/hello"); !ok || len(kids) != 1 || kids[0].Name != "greet.go" {
+		t.Fatalf("tree under the moved folder: %v %v", kids, ok)
+	}
+	if _, ok := s.ix.Children("pkg/hello"); ok {
+		t.Fatal("the old folder is still in the tree")
+	}
+
+	for _, c := range []struct {
+		body string
+		want int
+	}{
+		{`{"from":"main.go","to":"sub/deep.py"}`, http.StatusConflict},    // never overwrites
+		{`{"from":"missing.go","to":"x.go"}`, http.StatusNotFound},        // nothing to move
+		{`{"from":"","to":"x"}`, http.StatusBadRequest},                   // the root
+		{`{"from":"main.go","to":"../main.go"}`, http.StatusBadRequest},   // outside
+		{`{"from":"main.go","to":".git/main.go"}`, http.StatusBadRequest}, // into .git
+		{`{"from":"lib","to":"lib/inner/lib"}`, http.StatusBadRequest},    // into itself
+	} {
+		if rec = postJSON(t, s, "/api/fs/rename", c.body); rec.Code != c.want {
+			t.Errorf("%s: got %d, want %d (%s)", c.body, rec.Code, c.want, rec.Body.String())
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, "main.go")); err != nil {
+		t.Fatal("a refused rename moved the file")
+	}
+}
+
+func TestFSDelete(t *testing.T) {
+	s, root := newTestServer(t)
+	os.MkdirAll(filepath.Join(root, ".git"), 0o755)
+	os.WriteFile(filepath.Join(root, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o644)
+
+	if rec := postJSON(t, s, "/api/fs/delete", `{"path":"main.go"}`); rec.Code != 200 {
+		t.Fatalf("delete file: %d %s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "main.go")); !os.IsNotExist(err) || indexed(s, "main.go") {
+		t.Fatal("main.go is still there")
+	}
+	if rec := postJSON(t, s, "/api/fs/delete", `{"path":"sub"}`); rec.Code != 200 {
+		t.Fatalf("delete folder: %d %s", rec.Code, rec.Body.String())
+	}
+	if _, err := os.Stat(filepath.Join(root, "sub")); !os.IsNotExist(err) || indexed(s, "sub/deep.py") {
+		t.Fatal("sub is still there")
+	}
+	for _, c := range []struct {
+		body string
+		want int
+	}{
+		{`{"path":""}`, http.StatusBadRequest},
+		{`{"path":"."}`, http.StatusBadRequest},
+		{`{"path":".git"}`, http.StatusBadRequest},
+		{`{"path":".git/HEAD"}`, http.StatusBadRequest},
+		{`{"path":"../x"}`, http.StatusBadRequest},
+		{`{"path":"nope.go"}`, http.StatusNotFound},
+	} {
+		if rec := postJSON(t, s, "/api/fs/delete", c.body); rec.Code != c.want {
+			t.Errorf("%s: got %d, want %d", c.body, rec.Code, c.want)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(root, ".git", "HEAD")); err != nil {
+		t.Fatal(".git was touched")
+	}
+}
+
+// TestFSChangesNotifyTree checks that creating, moving and deleting from px0
+// tells event-stream listeners the tree changed shape.
+func TestFSChangesNotifyTree(t *testing.T) {
+	s, _ := newTestServer(t)
+	ch, cancel := s.gitWatcher.Subscribe()
+	defer cancel()
+	waitTree := func(what string) {
+		t.Helper()
+		deadline := time.After(5 * time.Second)
+		for {
+			select {
+			case msg := <-ch:
+				if strings.HasPrefix(string(msg), "event: tree\n") {
+					return
+				}
+			case <-deadline:
+				t.Fatalf("no tree event after %s", what)
+			}
+		}
+	}
+	postJSON(t, s, "/api/fs/new", `{"path":"a.txt"}`)
+	waitTree("fs/new")
+	postJSON(t, s, "/api/fs/rename", `{"from":"a.txt","to":"b.txt"}`)
+	waitTree("fs/rename")
+	postJSON(t, s, "/api/file/save", `{"path":"c.txt","content":"c"}`)
+	waitTree("saving a new file")
+	postJSON(t, s, "/api/fs/delete", `{"path":"b.txt"}`)
+	waitTree("fs/delete")
 }
 
 func TestTableEndpointServesRowsAndFileFlagsTables(t *testing.T) {
@@ -1308,8 +1571,10 @@ func TestMarkdownPreview(t *testing.T) {
 
 func TestSettingsAPIEndpoints(t *testing.T) {
 	isolateSettings(t)
-	root := t.TempDir()
-	srv := agentServer(t, root, "echo")
+	ix := NewIndex(t.TempDir())
+	ix.Build()
+	srv := NewServer(ix, nil)
+	t.Cleanup(srv.gitWatcher.Stop)
 
 	// 1. GET /api/settings
 	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
@@ -1374,10 +1639,6 @@ func TestSettingsAPIEndpoints(t *testing.T) {
 		t.Errorf("expected workbench.colorTheme nord from raw, got %v", m2["workbench.colorTheme"])
 	}
 }
-
-
-
-
 
 // ---------------------------------------------------------------- Session tests
 

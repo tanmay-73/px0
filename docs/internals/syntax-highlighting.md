@@ -1,6 +1,11 @@
-# Windowed Syntax Highlighting Engine
+# Server-Side Syntax Highlighting (Chroma)
 
-This document details the architecture and performance strategies of px0's windowed syntax highlighting engine ([`internal/render/render.go`](../../internal/render/render.go)).
+This document details px0's server-side highlighter ([`internal/render/render.go`](../../internal/render/render.go)).
+
+The editor does not use it. Monaco highlights in the browser with its Monarch tokenizers (about 80 languages bundled by `scripts/gen-monaco.js`, plus a JSON highlighter in `web/src/monaco.js`), coloured by the px0 theme through `web/src/theme.js` (see [Styling & Themes](styling-and-themes.md#2-monaco-themes)). Chroma is used on the server for:
+
+- **Markdown code fences** in `/api/markdown` (`highlightFence`, see [Markdown Preview](markdown.md#fenced-code-highlighting)).
+- **`/api/file`**, the windowed, highlighted line endpoint described below. The current frontend does not call it; it remains part of the HTTP API.
 
 ## 1. The Syntax Highlighting Bottleneck
 
@@ -12,11 +17,11 @@ However, full-AST lexical analysis is computationally intensive:
 - Highlighting a 100,000-line file (several megabytes of code) upfront would introduce a 3-to-8 second freeze before displaying the first line.
 - Naive lexing of an entire file requires holding millions of syntax token structs on the heap.
 
-To deliver instantaneous file opening (under 5 milliseconds), px0 implements Viewport-Based Windowed Highlighting with Dual-Tier Background Refinement.
+To answer `/api/file` in milliseconds for any file size, px0 implements windowed highlighting with dual-tier background refinement.
 
 ## 2. Windowed Highlighting Architecture
 
-Rather than tokenizing the entire file, px0 tokenizes only the slice of lines needed by the user's current scroll viewport, padded with leading and trailing context:
+Rather than tokenizing the entire file, px0 tokenizes only the slice of lines requested (`start`, `count`), padded with leading and trailing context:
 
 ```mermaid
 flowchart LR
@@ -57,7 +62,7 @@ px0 handles this with a Dual-Tier Processing Strategy:
 ```mermaid
 sequenceDiagram
     autonumber
-    participant UI as Browser Virtual DOM
+    participant UI as Client
     participant Server as /api/file Endpoint
     participant FastHl as Fast Window Highlighter
     participant BgHl as Background Full-File Lexer
@@ -69,17 +74,15 @@ sequenceDiagram
         Server->>FastHl: Lex lines 600-2400 (Window + Context)
         FastHl-->>Server: Return HTML + Flag (refine: true)
         Server-->>UI: Serve inexact lines immediately (<2ms)
-        Note over UI: UI paints lines with 0ms scroll hitching
         Server->>BgHl: Spawn background exact pass (if file < 2 MB)
         BgHl->>Cache: Populate exact token lines in background
-        UI->>Server: Poll /api/file (or chunk refinement swap)
+        UI->>Server: Request the chunk again
         Server-->>UI: Deliver exact tokenized HTML (refine: false)
-        Note over UI: Non-destructive DOM line swap (refineChunk)
     end
 ```
 
 1. Tier 1 (Instant Viewport Pass): Evaluates the bounded window (`start - hlContext` to `start + count + hlContext`). Slices out and returns the target lines in 1-2 ms. If the entire file fits within the first chunk (`Total <= hlChunk` and within `hlWindowBytes`), `chunk(0)` marks the document exact (`d.full = true`) immediately so no background pass is needed. Otherwise, if the window contains potential multi-line ambiguities, the payload includes `refine: true`.
-1. Tier 2 (Background Exact Pass): For multi-chunk files under `bgLimit = 2 MB`, a background goroutine performs an exact full-file tokenization pass. The exact result is stored in the LRU cache. The frontend's `refineChunk()` updates the rendered rows in-place without disturbing the user's scroll position or selection.
+1. Tier 2 (Background Exact Pass): For multi-chunk files under `bgLimit = 2 MB`, a background goroutine performs an exact full-file tokenization pass. The exact result is stored in the LRU cache, and a client that asks for the chunk again gets the exact lines (`refine: false`).
 
 ## 4. Short-Class CSS Tokenization
 
@@ -114,4 +117,4 @@ const (
 - Every cached line entry tracks its raw string byte footprint.
 - When total cached line data exceeds `cacheBudget`, oldest entries are evicted from the tail of the LRU list until memory drops below the threshold.
 - When the server has been idle for 15 seconds, `Server.scavenge()` invokes `render.Scavenge()`, trimming the cache down to `idleCacheBudget` (8 MB) before calling `debug.FreeOSMemory()`.
-- Switching between tabs and scrolling backward reuses cached HTML strings instantly without hitting Chroma.
+- Repeated requests for the same file and window reuse cached HTML strings without hitting Chroma.
